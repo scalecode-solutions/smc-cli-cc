@@ -1,6 +1,34 @@
 /// Shared record types emitted by all subcommands.
 use serde::Serialize;
 
+/// Marker stamped into every smc output stream (via the leading `meta` record /
+/// markdown comment). `search` excludes any conversation record whose text
+/// contains this tag, so smc's own output never recursively matches itself.
+pub const SMC_TAG: &str = "<smc-cc-cli>";
+
+// ── Meta (output header) ─────────────────────────────────────────────────────
+
+/// First record of every JSON output stream: provenance + the anti-recursion tag.
+#[derive(Serialize, Debug)]
+pub struct MetaRecord {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub tool: &'static str,
+    pub tag: &'static str,
+    pub version: &'static str,
+}
+
+impl MetaRecord {
+    pub fn current() -> Self {
+        Self {
+            record_type: "meta",
+            tool: "smc",
+            tag: SMC_TAG,
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
 // ── Error / Warning ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Debug)]

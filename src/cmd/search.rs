@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::models::Record;
-use crate::output::Emitter;
+use crate::output::{Emitter, SMC_TAG};
 use crate::util::discover::SessionFile;
 
 // ── Opts ───────────────────────────────────────────────────────────────────
@@ -33,8 +33,6 @@ pub struct SearchOpts {
     /// Hard cap on output tokens (0 = unlimited).
     pub max_tokens: usize,
 }
-
-pub const SMC_TAG: &str = "<smc-cc-cli>";
 
 // ── Records ────────────────────────────────────────────────────────────────
 
