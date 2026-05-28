@@ -70,6 +70,19 @@ impl<W: Write> Emitter<W> {
         Ok(true)
     }
 
+    /// Emit a record unconditionally, ignoring the token budget.
+    /// For small, critical trailers (e.g. a search `summary`) that must always
+    /// reach the consumer — otherwise budget truncation would silently drop the
+    /// one record that signals the output was incomplete.
+    pub fn emit_always<T: Serialize>(&mut self, rec: &T) -> Result<()> {
+        self.ensure_header(false)?;
+        let json = serde_json::to_string(rec)?;
+        self.used += tokens::approx_line(json.len());
+        self.out.write_all(json.as_bytes())?;
+        self.out.write_all(b"\n")?;
+        Ok(())
+    }
+
     /// Emit a `{"type":"warning",...}` record inline.
     /// Never returns an error — file-level warnings must never abort the run.
     pub fn warn(&mut self, file: Option<&str>, msg: &str) {

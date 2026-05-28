@@ -149,6 +149,10 @@ struct SearchArgs {
     /// Exclude thinking blocks from search
     #[arg(long)]
     no_thinking: bool,
+
+    /// Max characters per match snippet, centered on the match
+    #[arg(long, default_value = "500")]
+    snippet_len: usize,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -349,6 +353,7 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 include_smc: args.include_smc,
                 exclude_session: args.exclude_session,
                 max_tokens,
+                snippet_len: args.snippet_len,
             };
             let mut em = Emitter::stdout(max_tokens);
             cmd::search::run(&opts, &files, &mut em)?;

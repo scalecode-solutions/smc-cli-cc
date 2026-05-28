@@ -32,6 +32,8 @@ pub struct SearchOpts {
     pub exclude_session: Option<String>,
     /// Hard cap on output tokens (0 = unlimited).
     pub max_tokens: usize,
+    /// Max characters per match snippet (centered on the match).
+    pub snippet_len: usize,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -47,7 +49,12 @@ struct SearchRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     matched_query: String,
+    /// Snippet centered on the match (with `…` markers when the message is longer).
     text: String,
+    /// Character offset of the match within the full message.
+    match_offset: usize,
+    /// Full message length in characters (so the consumer knows how much `text` omits).
+    msg_chars: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,12 +66,26 @@ struct SearchSummary {
     #[serde(rename = "type")]
     record_type: &'static str,
     query: String,
+    /// Matches actually emitted.
     count: usize,
+    /// Matches found (≥ `count` when token-budget truncation cut emission short).
+    total_matched: usize,
     files_scanned: usize,
+    /// True when the token budget stopped emission before all matches were written.
+    truncated: bool,
+    /// True when `--max-results` may have hidden additional matches.
+    capped: bool,
     elapsed_ms: u128,
 }
 
 // ── Matcher ────────────────────────────────────────────────────────────────
+
+/// A match: which query hit, and the character offset of the earliest hit
+/// (used to center the snippet).
+struct MatchInfo {
+    matched: String,
+    char_pos: usize,
+}
 
 struct Matcher {
     regexes: Vec<Regex>,
@@ -89,47 +110,85 @@ impl Matcher {
         }
     }
 
-    fn first_match(&self, text: &str) -> Option<String> {
+    /// In OR mode: the matching query whose hit appears earliest in `text`.
+    /// In AND mode: all queries must hit; offset is the earliest among them.
+    fn first_match(&self, text: &str) -> Option<MatchInfo> {
         if self.and_mode {
             return self.all_match(text);
         }
+        let mut best: Option<MatchInfo> = None;
         if !self.regexes.is_empty() {
             for re in &self.regexes {
                 if let Some(m) = re.find(text) {
-                    return Some(m.as_str().to_string());
+                    let pos = text[..m.start()].chars().count();
+                    if best.as_ref().is_none_or(|b| pos < b.char_pos) {
+                        best = Some(MatchInfo { matched: m.as_str().to_string(), char_pos: pos });
+                    }
                 }
             }
         } else {
             let lower = text.to_lowercase();
             for q in &self.plains {
-                if lower.contains(q.as_str()) {
-                    return Some(q.clone());
+                if let Some(b) = lower.find(q.as_str()) {
+                    let pos = lower[..b].chars().count();
+                    if best.as_ref().is_none_or(|x| pos < x.char_pos) {
+                        best = Some(MatchInfo { matched: q.clone(), char_pos: pos });
+                    }
                 }
             }
         }
-        None
+        best
     }
 
-    fn all_match(&self, text: &str) -> Option<String> {
+    fn all_match(&self, text: &str) -> Option<MatchInfo> {
+        let mut min_pos = usize::MAX;
         if !self.regexes.is_empty() {
             let mut hits = Vec::new();
             for re in &self.regexes {
                 match re.find(text) {
-                    Some(m) => hits.push(m.as_str().to_string()),
+                    Some(m) => {
+                        hits.push(m.as_str().to_string());
+                        min_pos = min_pos.min(text[..m.start()].chars().count());
+                    }
                     None => return None,
                 }
             }
-            Some(hits.join(" + "))
+            Some(MatchInfo { matched: hits.join(" + "), char_pos: if min_pos == usize::MAX { 0 } else { min_pos } })
         } else {
             let lower = text.to_lowercase();
             for q in &self.plains {
-                if !lower.contains(q.as_str()) {
-                    return None;
+                match lower.find(q.as_str()) {
+                    Some(b) => min_pos = min_pos.min(lower[..b].chars().count()),
+                    None => return None,
                 }
             }
-            Some(self.plains.join(" + "))
+            Some(MatchInfo { matched: self.plains.join(" + "), char_pos: if min_pos == usize::MAX { 0 } else { min_pos } })
         }
     }
+}
+
+/// Build a snippet of at most `max_chars` characters centered on `match_pos`,
+/// adding `…` markers when the message extends past the window. Operates on
+/// chars (never bytes) so it can't split a multi-byte boundary.
+fn make_snippet(chars: &[char], match_pos: usize, max_chars: usize) -> String {
+    if max_chars == 0 || chars.len() <= max_chars {
+        return chars.iter().collect();
+    }
+    let half = max_chars / 2;
+    let mut start = match_pos.saturating_sub(half);
+    if start + max_chars > chars.len() {
+        start = chars.len() - max_chars;
+    }
+    let end = start + max_chars;
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(chars[start..end].iter());
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
 }
 
 // ── run ────────────────────────────────────────────────────────────────────
@@ -170,6 +229,8 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         })
         .collect();
 
+    let total_matched: usize = results.iter().map(|v| v.len()).sum();
+
     let mut count = 0usize;
     'outer: for hits in &results {
         for rec in hits {
@@ -184,10 +245,17 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         record_type: "summary",
         query: opts.queries.join(", "),
         count,
+        total_matched,
         files_scanned: filtered.len(),
+        // Budget cut emission short if we didn't write every match we found.
+        truncated: count < total_matched,
+        // max-results may have hidden more than we discovered.
+        capped: max > 0 && total_matched >= max,
         elapsed_ms: start.elapsed().as_millis(),
     };
-    em.emit(&summary)?;
+    // Always emit the summary, even when the budget is exhausted — it's the
+    // record that tells the consumer the output was incomplete.
+    em.emit_always(&summary)?;
 
     em.flush()?;
     Ok(())
@@ -287,10 +355,11 @@ fn search_file(
 
         // -- match --
 
-        if let Some(matched) = matcher.first_match(&text) {
+        if let Some(info) = matcher.first_match(&text) {
             hit_count.fetch_add(1, Ordering::Relaxed);
 
-            let preview: String = text.chars().take(500).collect();
+            let chars: Vec<char> = text.chars().collect();
+            let snippet = make_snippet(&chars, info.char_pos, opts.snippet_len);
 
             hits.push(SearchRecord {
                 record_type: "match",
@@ -299,8 +368,10 @@ fn search_file(
                 line: line_num + 1,
                 role: record.role().to_string(),
                 timestamp: msg.timestamp.clone(),
-                matched_query: matched,
-                text: preview,
+                matched_query: info.matched,
+                text: snippet,
+                match_offset: info.char_pos,
+                msg_chars: chars.len(),
                 tool_names: msg.tool_names().into_iter().map(String::from).collect(),
                 git_branch: msg.git_branch.clone(),
             });
