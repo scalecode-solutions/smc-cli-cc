@@ -157,6 +157,14 @@ struct SearchArgs {
     /// Result ordering: document (default), recency (newest first), or oldest
     #[arg(long, value_enum, default_value_t = cmd::search::SortMode::Document)]
     sort: cmd::search::SortMode,
+
+    /// Collapse matches into groups: session or thread
+    #[arg(long, value_enum)]
+    group_by: Option<cmd::search::GroupMode>,
+
+    /// Sample matches to include per group (with --group-by)
+    #[arg(long, default_value = "3")]
+    group_samples: usize,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -359,6 +367,8 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 max_tokens,
                 snippet_len: args.snippet_len,
                 sort: args.sort,
+                group_by: args.group_by,
+                group_samples: args.group_samples,
             };
             let mut em = Emitter::stdout(max_tokens);
             cmd::search::run(&opts, &files, &mut em)?;

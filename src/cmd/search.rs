@@ -1,4 +1,5 @@
 /// smc search — parallel full-text search across Claude Code conversation logs.
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use anyhow::Result;
@@ -21,6 +22,16 @@ pub enum SortMode {
     Document,
     Recency,
     Oldest,
+}
+
+/// Collapse matches into groups instead of listing every hit.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum GroupMode {
+    /// One group per session.
+    Session,
+    /// One group per conversation thread (root of the parentUuid chain).
+    Thread,
 }
 
 pub struct SearchOpts {
@@ -46,6 +57,10 @@ pub struct SearchOpts {
     pub snippet_len: usize,
     /// Result ordering.
     pub sort: SortMode,
+    /// Collapse matches into groups (by session or thread) instead of listing each.
+    pub group_by: Option<GroupMode>,
+    /// Sample matches to include per group.
+    pub group_samples: usize,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -57,6 +72,8 @@ struct SearchRecord {
     project: String,
     session_id: String,
     line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uuid: Option<String>,
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
@@ -71,6 +88,34 @@ struct SearchRecord {
     tool_names: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_branch: Option<String>,
+    /// Thread root (root of the parentUuid chain) — used for `--group-by thread`,
+    /// not serialized on individual match records.
+    #[serde(skip)]
+    thread_root: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct GroupRecord {
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    group_by: &'static str,
+    key: String,
+    project: String,
+    session_id: String,
+    hits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ts: Option<String>,
+    samples: Vec<GroupSample>,
+}
+
+#[derive(Serialize, Debug)]
+struct GroupSample {
+    line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    text: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -250,30 +295,35 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         SortMode::Document => {}
     }
 
-    // Cap AFTER sorting so "the N most recent" is honored, not "N arbitrary".
-    let capped = max > 0 && all.len() > max;
-    if max > 0 {
-        all.truncate(max);
-    }
-    let intended = all.len();
-
-    let mut count = 0usize;
-    for rec in &all {
-        if !em.emit(rec)? {
-            break;
+    let (count, intended, capped) = if let Some(mode) = opts.group_by {
+        emit_groups(&all, mode, max, opts.group_samples, em)?
+    } else {
+        // Cap AFTER sorting so "the N most recent" is honored, not "N arbitrary".
+        let capped = max > 0 && all.len() > max;
+        if max > 0 {
+            all.truncate(max);
         }
-        count += 1;
-    }
+        let intended = all.len();
+        let mut count = 0usize;
+        for rec in &all {
+            if !em.emit(rec)? {
+                break;
+            }
+            count += 1;
+        }
+        (count, intended, capped)
+    };
 
     let summary = SearchSummary {
         record_type: "summary",
         query: opts.queries.join(", "),
+        // In group mode `count` is groups emitted; total_matched is always matches.
         count,
         total_matched,
         files_scanned: filtered.len(),
-        // Budget cut emission short if we didn't write every match we meant to.
+        // Budget cut emission short if we didn't write everything we meant to.
         truncated: count < intended,
-        // max-results hid additional matches.
+        // max-results hid additional matches/groups.
         capped,
         elapsed_ms: start.elapsed().as_millis(),
     };
@@ -285,10 +335,104 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
     Ok(())
 }
 
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+struct GroupAccum {
+    project: String,
+    session_id: String,
+    hits: usize,
+    first_ts: Option<String>,
+    last_ts: Option<String>,
+    samples: Vec<GroupSample>,
+}
+
+/// Collapse already-sorted matches into groups (by session or thread) and emit a
+/// `group` record per group. Returns (emitted, intended, capped). Group order
+/// follows first appearance in the sorted match list (so it inherits --sort).
+fn emit_groups<W: Write>(
+    all: &[SearchRecord],
+    mode: GroupMode,
+    max: usize,
+    samples_per_group: usize,
+    em: &mut Emitter<W>,
+) -> Result<(usize, usize, bool)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, GroupAccum> = HashMap::new();
+
+    for rec in all {
+        let key = match mode {
+            GroupMode::Session => rec.session_id.clone(),
+            GroupMode::Thread => rec.thread_root.clone().unwrap_or_else(|| rec.session_id.clone()),
+        };
+        let g = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            GroupAccum {
+                project: rec.project.clone(),
+                session_id: rec.session_id.clone(),
+                hits: 0,
+                first_ts: None,
+                last_ts: None,
+                samples: Vec::new(),
+            }
+        });
+        g.hits += 1;
+        if let Some(ts) = &rec.timestamp {
+            if g.first_ts.as_deref().is_none_or(|x| ts.as_str() < x) {
+                g.first_ts = Some(ts.clone());
+            }
+            if g.last_ts.as_deref().is_none_or(|x| ts.as_str() > x) {
+                g.last_ts = Some(ts.clone());
+            }
+        }
+        if g.samples.len() < samples_per_group {
+            g.samples.push(GroupSample {
+                line: rec.line,
+                timestamp: rec.timestamp.clone(),
+                text: rec.text.clone(),
+            });
+        }
+    }
+
+    let total_groups = order.len();
+    let capped = max > 0 && total_groups > max;
+    let intended = if max > 0 { total_groups.min(max) } else { total_groups };
+
+    let group_by = match mode {
+        GroupMode::Session => "session",
+        GroupMode::Thread => "thread",
+    };
+
+    let mut count = 0usize;
+    for key in order.into_iter().take(intended) {
+        let g = groups.remove(&key).expect("group key present");
+        let rec = GroupRecord {
+            record_type: "group",
+            group_by,
+            key,
+            project: g.project,
+            session_id: g.session_id,
+            hits: g.hits,
+            first_ts: g.first_ts,
+            last_ts: g.last_ts,
+            samples: g.samples,
+        };
+        if !em.emit(&rec)? {
+            break;
+        }
+        count += 1;
+    }
+
+    Ok((count, intended, capped))
+}
+
 // ── Per-file search ────────────────────────────────────────────────────────
 
 fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<SearchRecord> {
     let mut hits = Vec::new();
+    // For `--group-by thread` we need the full uuid→parent map of the session to
+    // resolve each match's thread root, so build it for every message (pre-filter).
+    let want_thread = opts.group_by == Some(GroupMode::Thread);
+    let mut uuid2parent: HashMap<String, Option<String>> = HashMap::new();
 
     let Ok(f) = std::fs::File::open(&file.path) else { return hits };
     let reader = std::io::BufReader::with_capacity(256 * 1024, f);
@@ -302,6 +446,12 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
 
         let Ok(record) = serde_json::from_str::<Record>(&line) else { continue };
         let Some(msg) = record.as_message() else { continue };
+
+        if want_thread {
+            if let Some(u) = &msg.uuid {
+                uuid2parent.insert(u.clone(), msg.parent_uuid_str());
+            }
+        }
 
         // -- filters --
 
@@ -378,6 +528,7 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
                 project: file.project_name.clone(),
                 session_id: file.session_id.clone(),
                 line: line_num + 1,
+                uuid: msg.uuid.clone(),
                 role: record.role().to_string(),
                 timestamp: msg.timestamp.clone(),
                 matched_query: info.matched,
@@ -386,11 +537,37 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
                 msg_chars: chars.len(),
                 tool_names: msg.tool_names().into_iter().map(String::from).collect(),
                 git_branch: msg.git_branch.clone(),
+                thread_root: None,
             });
         }
     }
 
+    // Resolve each match's thread root by walking the parentUuid chain to the top.
+    if want_thread {
+        for h in &mut hits {
+            if let Some(u) = &h.uuid {
+                h.thread_root = Some(resolve_thread_root(u, &uuid2parent));
+            }
+        }
+    }
+
     hits
+}
+
+/// Walk the parentUuid chain from `start` up to the topmost known message.
+fn resolve_thread_root(start: &str, map: &HashMap<String, Option<String>>) -> String {
+    let mut cur = start.to_string();
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(cur.clone()) {
+            break; // cycle guard
+        }
+        match map.get(&cur) {
+            Some(Some(parent)) if map.contains_key(parent) => cur = parent.clone(),
+            _ => break,
+        }
+    }
+    cur
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

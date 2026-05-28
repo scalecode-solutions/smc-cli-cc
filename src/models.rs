@@ -89,6 +89,11 @@ pub enum ContentBlock {
 // ── Content extraction ─────────────────────────────────────────────────────
 
 impl MessageRecord {
+    /// `parentUuid` as a string (it's a string or null in the logs).
+    pub fn parent_uuid_str(&self) -> Option<String> {
+        self.parent_uuid.as_ref().and_then(|v| v.as_str().map(String::from))
+    }
+
     /// All text content (text blocks + thinking + tool use/results).
     pub fn text_content(&self) -> String {
         match &self.message.content {
