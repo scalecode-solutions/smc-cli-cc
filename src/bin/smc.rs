@@ -153,6 +153,10 @@ struct SearchArgs {
     /// Max characters per match snippet, centered on the match
     #[arg(long, default_value = "500")]
     snippet_len: usize,
+
+    /// Result ordering: document (default), recency (newest first), or oldest
+    #[arg(long, value_enum, default_value_t = cmd::search::SortMode::Document)]
+    sort: cmd::search::SortMode,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -354,6 +358,7 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 exclude_session: args.exclude_session,
                 max_tokens,
                 snippet_len: args.snippet_len,
+                sort: args.sort,
             };
             let mut em = Emitter::stdout(max_tokens);
             cmd::search::run(&opts, &files, &mut em)?;

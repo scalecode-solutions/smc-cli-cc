@@ -1,6 +1,5 @@
 /// smc search — parallel full-text search across Claude Code conversation logs.
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use rayon::prelude::*;
@@ -12,6 +11,17 @@ use crate::output::{Emitter, SMC_TAG};
 use crate::util::discover::SessionFile;
 
 // ── Opts ───────────────────────────────────────────────────────────────────
+
+/// Result ordering. `Document` keeps file/line order (deterministic); `Recency`
+/// and `Oldest` sort by message timestamp.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum SortMode {
+    #[default]
+    Document,
+    Recency,
+    Oldest,
+}
 
 pub struct SearchOpts {
     pub queries: Vec<String>,
@@ -34,6 +44,8 @@ pub struct SearchOpts {
     pub max_tokens: usize,
     /// Max characters per match snippet (centered on the match).
     pub snippet_len: usize,
+    /// Result ordering.
+    pub sort: SortMode,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -216,29 +228,41 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         })
         .collect();
 
-    let hit_count = AtomicUsize::new(0);
     let max = opts.max_results;
 
+    // Search exhaustively (parallel collect preserves file order → deterministic
+    // "document" order). We no longer early-exit at max_results: to honor a sort
+    // we need every match before truncating, and this makes total_matched exact
+    // and the result set reproducible (the old atomic cap was racy).
     let results: Vec<Vec<SearchRecord>> = filtered
         .par_iter()
-        .map(|file| {
-            if max > 0 && hit_count.load(Ordering::Relaxed) >= max {
-                return vec![];
-            }
-            search_file(file, &matcher, opts, &hit_count, max)
-        })
+        .map(|file| search_file(file, &matcher, opts))
         .collect();
 
-    let total_matched: usize = results.iter().map(|v| v.len()).sum();
+    let mut all: Vec<SearchRecord> = results.into_iter().flatten().collect();
+    let total_matched = all.len();
+
+    // Sort per mode (timestamps are ISO-8601 → lexically ordered; missing
+    // timestamps sort last under recency). Document order is left as found.
+    match opts.sort {
+        SortMode::Recency => all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)),
+        SortMode::Oldest => all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp)),
+        SortMode::Document => {}
+    }
+
+    // Cap AFTER sorting so "the N most recent" is honored, not "N arbitrary".
+    let capped = max > 0 && all.len() > max;
+    if max > 0 {
+        all.truncate(max);
+    }
+    let intended = all.len();
 
     let mut count = 0usize;
-    'outer: for hits in &results {
-        for rec in hits {
-            if !em.emit(rec)? {
-                break 'outer;
-            }
-            count += 1;
+    for rec in &all {
+        if !em.emit(rec)? {
+            break;
         }
+        count += 1;
     }
 
     let summary = SearchSummary {
@@ -247,10 +271,10 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         count,
         total_matched,
         files_scanned: filtered.len(),
-        // Budget cut emission short if we didn't write every match we found.
-        truncated: count < total_matched,
-        // max-results may have hidden more than we discovered.
-        capped: max > 0 && total_matched >= max,
+        // Budget cut emission short if we didn't write every match we meant to.
+        truncated: count < intended,
+        // max-results hid additional matches.
+        capped,
         elapsed_ms: start.elapsed().as_millis(),
     };
     // Always emit the summary, even when the budget is exhausted — it's the
@@ -263,13 +287,7 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
 
 // ── Per-file search ────────────────────────────────────────────────────────
 
-fn search_file(
-    file: &SessionFile,
-    matcher: &Matcher,
-    opts: &SearchOpts,
-    hit_count: &AtomicUsize,
-    max: usize,
-) -> Vec<SearchRecord> {
+fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<SearchRecord> {
     let mut hits = Vec::new();
 
     let Ok(f) = std::fs::File::open(&file.path) else { return hits };
@@ -277,10 +295,6 @@ fn search_file(
 
     use std::io::BufRead;
     for (line_num, line) in reader.lines().enumerate() {
-        if max > 0 && hit_count.load(Ordering::Relaxed) >= max {
-            break;
-        }
-
         let Ok(line) = line else { continue };
         if line.trim().is_empty() {
             continue;
@@ -356,8 +370,6 @@ fn search_file(
         // -- match --
 
         if let Some(info) = matcher.first_match(&text) {
-            hit_count.fetch_add(1, Ordering::Relaxed);
-
             let chars: Vec<char> = text.chars().collect();
             let snippet = make_snippet(&chars, info.char_pos, opts.snippet_len);
 
