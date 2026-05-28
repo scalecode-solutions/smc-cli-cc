@@ -6,7 +6,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/smc-cli-cc.svg?style=flat-square&color=fc8d62&logo=rust)](https://crates.io/crates/smc-cli-cc)
 [![crates.io downloads](https://img.shields.io/crates/d/smc-cli-cc?style=flat-square&color=2ecc71)](https://crates.io/crates/smc-cli-cc)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 </div>
@@ -66,6 +66,12 @@ smc search "git push" --tool-input                 # Search tool commands/argume
 smc search --file src/main.rs "refactor"           # Messages that touched a file
 smc search "architecture" --thinking               # Search only thinking blocks
 smc search "deploy" --no-thinking                  # Exclude thinking blocks
+smc search "decision" --sort recency               # Newest matches first
+smc search "spm" "tracker" --sort relevance        # Rank by BM25 relevance
+smc search "auth" --score                          # Attach a BM25 score to each match
+smc search "migration" --group-by session          # Collapse hits per session
+smc search "labor" --group-by thread               # Collapse hits per conversation thread
+smc search "schema" --snippet-len 200              # Wider match-centered snippets
 ```
 
 ### Search Flags
@@ -80,13 +86,24 @@ smc search "deploy" --no-thinking                  # Exclude thinking blocks
 | `--branch <BRANCH>` | | Filter by git branch |
 | `--and` | `-a` | Require ALL terms to match (default is OR) |
 | `--regex` | `-e` | Treat query as regex |
-| `--max <N>` | `-n` | Maximum results (default: 50) |
+| `--max <N>` | `-n` | Maximum results — groups in group mode (default: 50) |
 | `--file <PATH>` | | Filter to messages that touch a file path |
 | `--tool-input` | | Search only within tool input content |
 | `--thinking` | | Search only within thinking blocks |
 | `--no-thinking` | | Exclude thinking blocks from search |
+| `--sort <MODE>` | | Order results: `document` (default), `recency`, `oldest`, `relevance` |
+| `--score` | | Attach a BM25 relevance score to each match (implied by `--sort relevance`) |
+| `--snippet-len <N>` | | Max characters per match snippet, centered on the match (default: 500) |
+| `--group-by <MODE>` | | Collapse matches into groups: `session` or `thread` |
+| `--group-samples <N>` | | Sample matches to include per group (default: 3) |
 | `--include-smc` | `-i` | Include previous smc output (excluded by default) |
 | `--exclude-session <ID>` | | Skip a specific session |
+
+### Ranking, snippets & grouping
+
+- **`--sort`** orders results. `recency`/`oldest` sort by message timestamp; `relevance` ranks by BM25 (term frequency × inverse document frequency, normalized by message length). The result cap (`--max`) is applied **after** sorting, so `--sort recency --max 10` returns the 10 *most recent* matches, not 10 arbitrary ones.
+- **Snippets are centered on the match**, not truncated from the start — so the matching text is always visible. Each match also reports `match_offset` (where the hit is) and `msg_chars` (full message length).
+- **`--group-by`** collapses many hits about one conversation into a single `group` record (hit count, timestamp range, and a few sample snippets). `thread` resolves each match's conversation thread by walking the `parentUuid` chain to its root, separating a long session into its distinct threads.
 
 ### AI-Friendly Features
 
@@ -97,19 +114,27 @@ smc search "bug" --exclude-session 394af           # Skip the current session
 smc search "bug" -i                                # Include previous smc output
 ```
 
-By default, search excludes records containing `<smc-cc-cli>` tags — preventing the recursion problem where an AI searching for "X" finds its own previous search results for "X". Use `-i`/`--include-smc` to opt back in.
+Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag (and the tool version) into its output. By default, search **excludes** any conversation record containing that tag — so an AI searching for "X" never matches its own previous search output for "X". The header is emitted before any token-budget truncation, so the guard holds even on cut-short output. Use `-i`/`--include-smc` to opt back in.
 
 ---
 
 ## Output Format
 
-All output is JSON Lines — one record per line, zero ANSI, zero pagination:
+All output is JSON Lines — one record per line, zero ANSI, zero pagination. Every stream opens with a `meta` record and search closes with a `summary`:
 
 ```jsonl
-{"type":"match","project":"myapp","session_id":"394afc...","line":42,"role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","text":"..."}
-{"type":"match","project":"myapp","session_id":"394afc...","line":87,"role":"assistant","timestamp":"2026-02-10T15:30:05Z","matched_query":"deploy","text":"..."}
-{"type":"summary","query":"deploy","count":2,"files_scanned":293,"elapsed_ms":3}
+{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.8.7"}
+{"type":"match","project":"myapp","session_id":"394afc...","line":42,"uuid":"a1b2...","role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","score":3.41,"text":"…centered on the match…","match_offset":1014,"msg_chars":1293}
+{"type":"summary","query":"deploy","count":2,"total_matched":2,"files_scanned":293,"truncated":false,"capped":false,"elapsed_ms":3}
 ```
+
+With `--group-by`, matches are replaced by `group` records:
+
+```jsonl
+{"type":"group","group_by":"session","key":"394afc...","project":"myapp","session_id":"394afc...","hits":12,"first_ts":"2026-02-10T15:30:00Z","last_ts":"2026-02-10T16:05:00Z","samples":[{"line":42,"timestamp":"...","text":"..."}]}
+```
+
+Field notes: `score` (BM25) appears only when scoring is on; `match_offset`/`msg_chars` tell you where the hit is and how much the snippet omits; the summary's `total_matched` is the true match count, `truncated` flags token-budget cutoff, and `capped` flags that `--max` hid more. The `summary` is always emitted, even when truncated.
 
 Every command emits typed records with a `type` field. Pipe through `jq` for formatting:
 
@@ -240,11 +265,11 @@ smc uses [Rayon](https://github.com/rayon-rs/rayon) for parallel file processing
 
 ## Development
 
-Requires Rust 1.70+.
+Requires Rust 1.85+ (edition 2024).
 
 ```bash
-git clone https://github.com/scalecode-solutions/smc_cli.git
-cd smc_cli
+git clone https://github.com/scalecode-solutions/smc-cli-cc.git
+cd smc-cli-cc
 cargo build --release
 cargo install --path .
 ```
