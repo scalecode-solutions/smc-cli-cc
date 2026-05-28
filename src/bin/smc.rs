@@ -165,6 +165,10 @@ struct SearchArgs {
     /// Sample matches to include per group (with --group-by)
     #[arg(long, default_value = "3")]
     group_samples: usize,
+
+    /// Emit a BM25 relevance score per match (implied by --sort relevance)
+    #[arg(long)]
+    score: bool,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -369,6 +373,7 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 sort: args.sort,
                 group_by: args.group_by,
                 group_samples: args.group_samples,
+                score: args.score,
             };
             let mut em = Emitter::stdout(max_tokens);
             cmd::search::run(&opts, &files, &mut em)?;

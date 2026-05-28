@@ -22,6 +22,8 @@ pub enum SortMode {
     Document,
     Recency,
     Oldest,
+    /// BM25 relevance (highest first). Implies scoring.
+    Relevance,
 }
 
 /// Collapse matches into groups instead of listing every hit.
@@ -61,6 +63,8 @@ pub struct SearchOpts {
     pub group_by: Option<GroupMode>,
     /// Sample matches to include per group.
     pub group_samples: usize,
+    /// Compute and emit a BM25 relevance score per match.
+    pub score: bool,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -78,6 +82,9 @@ struct SearchRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     matched_query: String,
+    /// BM25 relevance score (present when scoring is enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<f64>,
     /// Snippet centered on the match (with `…` markers when the message is longer).
     text: String,
     /// Character offset of the match within the full message.
@@ -92,6 +99,12 @@ struct SearchRecord {
     /// not serialized on individual match records.
     #[serde(skip)]
     thread_root: Option<String>,
+    /// Document length in words and per-term frequencies — BM25 inputs, computed
+    /// during the scan and consumed when scoring; never serialized.
+    #[serde(skip)]
+    doc_len: usize,
+    #[serde(skip)]
+    tfs: Vec<usize>,
 }
 
 #[derive(Serialize, Debug)]
@@ -197,6 +210,21 @@ impl Matcher {
         best
     }
 
+    /// Number of query terms (plain terms or regexes).
+    fn term_count(&self) -> usize {
+        if self.regexes.is_empty() { self.plains.len() } else { self.regexes.len() }
+    }
+
+    /// Per-term occurrence counts in `text` (term frequency for BM25).
+    fn tf_per_term(&self, text: &str) -> Vec<usize> {
+        if !self.regexes.is_empty() {
+            self.regexes.iter().map(|re| re.find_iter(text).count()).collect()
+        } else {
+            let lower = text.to_lowercase();
+            self.plains.iter().map(|q| lower.matches(q.as_str()).count()).collect()
+        }
+    }
+
     fn all_match(&self, text: &str) -> Option<MatchInfo> {
         let mut min_pos = usize::MAX;
         if !self.regexes.is_empty() {
@@ -248,6 +276,60 @@ fn make_snippet(chars: &[char], match_pos: usize, max_chars: usize) -> String {
     s
 }
 
+// ── BM25 scoring ─────────────────────────────────────────────────────────────
+
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// Corpus statistics gathered over the searched documents (per-term document
+/// frequency, document count, and total length), reduced across files.
+#[derive(Default)]
+struct CorpusStats {
+    docs: usize,
+    total_len: usize,
+    /// Document frequency per query term (how many docs contain it).
+    df: Vec<usize>,
+}
+
+impl CorpusStats {
+    fn new(terms: usize) -> Self {
+        Self { docs: 0, total_len: 0, df: vec![0; terms] }
+    }
+
+    fn merge(&mut self, other: &CorpusStats) {
+        self.docs += other.docs;
+        self.total_len += other.total_len;
+        if self.df.len() < other.df.len() {
+            self.df.resize(other.df.len(), 0);
+        }
+        for (i, c) in other.df.iter().enumerate() {
+            self.df[i] += c;
+        }
+    }
+
+    /// BM25 score for one document given its per-term frequencies and length.
+    fn bm25(&self, tfs: &[usize], doc_len: usize) -> f64 {
+        if self.docs == 0 {
+            return 0.0;
+        }
+        let n = self.docs as f64;
+        let avgdl = (self.total_len as f64 / n).max(1.0);
+        let mut score = 0.0;
+        for (i, &tf) in tfs.iter().enumerate() {
+            if tf == 0 {
+                continue;
+            }
+            let df = *self.df.get(i).unwrap_or(&0) as f64;
+            // Robertson/Sparck-Jones IDF with the +1 guard (always ≥ 0).
+            let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+            let f = tf as f64;
+            let denom = f + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len as f64 / avgdl);
+            score += idf * (f * (BM25_K1 + 1.0)) / denom;
+        }
+        score
+    }
+}
+
 // ── run ────────────────────────────────────────────────────────────────────
 
 pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
@@ -279,19 +361,37 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
     // "document" order). We no longer early-exit at max_results: to honor a sort
     // we need every match before truncating, and this makes total_matched exact
     // and the result set reproducible (the old atomic cap was racy).
-    let results: Vec<Vec<SearchRecord>> = filtered
+    let scoring = opts.score || opts.sort == SortMode::Relevance;
+
+    let results: Vec<(Vec<SearchRecord>, CorpusStats)> = filtered
         .par_iter()
-        .map(|file| search_file(file, &matcher, opts))
+        .map(|file| search_file(file, &matcher, opts, scoring))
         .collect();
 
-    let mut all: Vec<SearchRecord> = results.into_iter().flatten().collect();
+    // Reduce corpus stats across files (only meaningful when scoring).
+    let mut corpus = CorpusStats::new(matcher.term_count());
+    let mut all: Vec<SearchRecord> = Vec::new();
+    for (hits, stats) in results {
+        corpus.merge(&stats);
+        all.extend(hits);
+    }
     let total_matched = all.len();
+
+    // Score (BM25) using the now-complete corpus stats.
+    if scoring {
+        for rec in &mut all {
+            rec.score = Some((corpus.bm25(&rec.tfs, rec.doc_len) * 10000.0).round() / 10000.0);
+        }
+    }
 
     // Sort per mode (timestamps are ISO-8601 → lexically ordered; missing
     // timestamps sort last under recency). Document order is left as found.
     match opts.sort {
         SortMode::Recency => all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)),
         SortMode::Oldest => all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp)),
+        SortMode::Relevance => all.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        }),
         SortMode::Document => {}
     }
 
@@ -427,14 +527,20 @@ fn emit_groups<W: Write>(
 
 // ── Per-file search ────────────────────────────────────────────────────────
 
-fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<SearchRecord> {
+fn search_file(
+    file: &SessionFile,
+    matcher: &Matcher,
+    opts: &SearchOpts,
+    scoring: bool,
+) -> (Vec<SearchRecord>, CorpusStats) {
     let mut hits = Vec::new();
+    let mut corpus = CorpusStats::new(matcher.term_count());
     // For `--group-by thread` we need the full uuid→parent map of the session to
     // resolve each match's thread root, so build it for every message (pre-filter).
     let want_thread = opts.group_by == Some(GroupMode::Thread);
     let mut uuid2parent: HashMap<String, Option<String>> = HashMap::new();
 
-    let Ok(f) = std::fs::File::open(&file.path) else { return hits };
+    let Ok(f) = std::fs::File::open(&file.path) else { return (hits, corpus) };
     let reader = std::io::BufReader::with_capacity(256 * 1024, f);
 
     use std::io::BufRead;
@@ -517,6 +623,20 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
             continue;
         }
 
+        // -- corpus stats (BM25): count every searched doc, not just matches --
+
+        let tfs = if scoring { matcher.tf_per_term(&text) } else { Vec::new() };
+        let doc_len = if scoring { text.split_whitespace().count() } else { 0 };
+        if scoring {
+            corpus.docs += 1;
+            corpus.total_len += doc_len;
+            for (i, &tf) in tfs.iter().enumerate() {
+                if tf > 0 {
+                    corpus.df[i] += 1;
+                }
+            }
+        }
+
         // -- match --
 
         if let Some(info) = matcher.first_match(&text) {
@@ -532,12 +652,15 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
                 role: record.role().to_string(),
                 timestamp: msg.timestamp.clone(),
                 matched_query: info.matched,
+                score: None,
                 text: snippet,
                 match_offset: info.char_pos,
                 msg_chars: chars.len(),
                 tool_names: msg.tool_names().into_iter().map(String::from).collect(),
                 git_branch: msg.git_branch.clone(),
                 thread_root: None,
+                doc_len,
+                tfs,
             });
         }
     }
@@ -551,7 +674,7 @@ fn search_file(file: &SessionFile, matcher: &Matcher, opts: &SearchOpts) -> Vec<
         }
     }
 
-    hits
+    (hits, corpus)
 }
 
 /// Walk the parentUuid chain from `start` up to the topmost known message.
@@ -596,5 +719,32 @@ mod tests {
         let m = Matcher::new(&["fn\\s+\\w+".into()], true, false).unwrap();
         assert!(m.first_match("pub fn main()").is_some());
         assert!(m.first_match("no function here").is_none());
+    }
+
+    #[test]
+    fn tf_per_term_counts_occurrences() {
+        let m = Matcher::new(&["x".into(), "y".into()], false, false).unwrap();
+        assert_eq!(m.tf_per_term("x x x y"), vec![3, 1]);
+        assert_eq!(m.tf_per_term("nothing here"), vec![0, 0]);
+    }
+
+    #[test]
+    fn bm25_hand_computed() {
+        // N=3 docs, term df=2, total_len=9 → avgdl=3, IDF=ln(1.6)=0.4700.
+        let mut c = CorpusStats::new(1);
+        c.docs = 3;
+        c.total_len = 9;
+        c.df = vec![2];
+        let hi = c.bm25(&[3], 3); // tf=3 → 0.4700 * (3*2.2)/(3+1.2) = 0.73858
+        let lo = c.bm25(&[1], 3); // tf=1 → 0.4700 * (1*2.2)/(1+1.2) = 0.47000
+        assert!(hi > lo, "more occurrences must score higher");
+        assert!((hi - 0.73858).abs() < 0.001, "hi was {hi}");
+        assert!((lo - 0.47000).abs() < 0.001, "lo was {lo}");
+    }
+
+    #[test]
+    fn bm25_zero_when_empty_corpus() {
+        let c = CorpusStats::new(1);
+        assert_eq!(c.bm25(&[5], 10), 0.0);
     }
 }
