@@ -169,6 +169,10 @@ struct SearchArgs {
     /// Emit a BM25 relevance score per match (implied by --sort relevance)
     #[arg(long)]
     score: bool,
+
+    /// Include N surrounding messages per match as inline context
+    #[arg(long, short = 'C', value_name = "N", default_value = "0")]
+    context: usize,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -374,6 +378,7 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 group_by: args.group_by,
                 group_samples: args.group_samples,
                 score: args.score,
+                context: args.context,
             };
             let mut em = Emitter::stdout(max_tokens);
             cmd::search::run(&opts, &files, &mut em)?;
