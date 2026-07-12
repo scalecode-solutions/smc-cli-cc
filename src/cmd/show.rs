@@ -11,11 +11,9 @@ use crate::util::discover::SessionFile;
 // ── Opts ───────────────────────────────────────────────────────────────────
 
 pub struct ShowOpts {
-    pub session: String,
     pub thinking: bool,
     pub from: Option<usize>,
     pub to: Option<usize>,
-    pub max_tokens: usize,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -25,6 +23,10 @@ struct MessageOut {
     #[serde(rename = "type")]
     record_type: &'static str,
     index: usize,
+    /// 1-based JSONL line number — the address `smc context`/`search` speak.
+    line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uuid: Option<String>,
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
@@ -43,11 +45,13 @@ struct ToolCallOut {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &ShowOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether any message was emitted.
+pub fn run<W: Write>(opts: &ShowOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<bool> {
     let records = crate::cmd::parse_records(file)?;
 
     let mut index = 0usize;
-    for record in &records {
+    let mut emitted = false;
+    for (line, record) in &records {
         if !record.is_message() {
             continue;
         }
@@ -61,10 +65,11 @@ pub fn run<W: Write>(opts: &ShowOpts, file: &SessionFile, em: &mut Emitter<W>) -
 
         if in_range {
             let msg = record.as_message().unwrap();
-            let out = build_message_out(record, msg, index, opts.thinking);
+            let out = build_message_out(record, msg, index, *line, opts.thinking);
             if !em.emit(&out)? {
                 break;
             }
+            emitted = true;
         }
 
         index += 1;
@@ -77,7 +82,7 @@ pub fn run<W: Write>(opts: &ShowOpts, file: &SessionFile, em: &mut Emitter<W>) -
     }
 
     em.flush()?;
-    Ok(())
+    Ok(emitted)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -86,6 +91,7 @@ fn build_message_out(
     record: &Record,
     msg: &crate::models::MessageRecord,
     index: usize,
+    line: usize,
     include_thinking: bool,
 ) -> MessageOut {
     let mut text_parts = Vec::new();
@@ -120,6 +126,8 @@ fn build_message_out(
     MessageOut {
         record_type: "message",
         index,
+        line,
+        uuid: msg.uuid.clone(),
         role: record.role().to_string(),
         timestamp: msg.timestamp.clone(),
         text: text_parts.join("\n"),

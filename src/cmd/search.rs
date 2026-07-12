@@ -54,8 +54,6 @@ pub struct SearchOpts {
     pub max_results: usize,
     pub include_smc: bool,
     pub exclude_session: Option<String>,
-    /// Hard cap on output tokens (0 = unlimited).
-    pub max_tokens: usize,
     /// Max characters per match snippet (centered on the match).
     pub snippet_len: usize,
     /// Result ordering.
@@ -373,7 +371,8 @@ impl CorpusStats {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether anything matched (drives the process exit code).
+pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
     anyhow::ensure!(!opts.queries.is_empty(), "search query cannot be empty");
 
     let start = std::time::Instant::now();
@@ -486,7 +485,7 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
     em.emit_always(&summary)?;
 
     em.flush()?;
-    Ok(())
+    Ok(total_matched > 0)
 }
 
 // ── Grouping ─────────────────────────────────────────────────────────────────

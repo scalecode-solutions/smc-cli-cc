@@ -9,12 +9,6 @@ use crate::models;
 use crate::output::Emitter;
 use crate::util::discover::SessionFile;
 
-// ── Opts ───────────────────────────────────────────────────────────────────
-
-pub struct ProjectsOpts {
-    pub max_tokens: usize,
-}
-
 // ── Records ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Debug)]
@@ -33,7 +27,8 @@ struct ProjectRecord {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(_opts: &ProjectsOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+pub fn run<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
+    let start = std::time::Instant::now();
     struct Info {
         sessions: usize,
         total_size: u64,
@@ -102,11 +97,12 @@ pub fn run<W: Write>(_opts: &ProjectsOpts, files: &[SessionFile], em: &mut Emitt
     let summary = crate::output::SummaryRecord {
         record_type: "summary",
         count: sorted.len(),
-        files_scanned: None,
-        elapsed_ms: 0,
+        files_scanned: Some(files.len()),
+        elapsed_ms: start.elapsed().as_millis(),
     };
-    em.emit(&summary)?;
+    // Always emitted — this is the record that signals truncation.
+    em.emit_always(&summary)?;
 
     em.flush()?;
-    Ok(())
+    Ok(!sorted.is_empty())
 }

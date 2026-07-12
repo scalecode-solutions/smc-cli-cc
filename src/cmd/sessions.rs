@@ -2,6 +2,7 @@
 use std::io::Write;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::models::Record;
@@ -30,14 +31,19 @@ struct SessionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    last_timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
     msg_count: u32,
 }
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &SessionsOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether any session was emitted.
+pub fn run<W: Write>(opts: &SessionsOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
     let start = std::time::Instant::now();
+
+    let before = opts.before.clone().map(crate::util::dates::normalize_before);
 
     let filtered: Vec<&SessionFile> = files
         .iter()
@@ -51,67 +57,73 @@ pub fn run<W: Write>(opts: &SessionsOpts, files: &[SessionFile], em: &mut Emitte
         })
         .collect();
 
-    let mut entries: Vec<SessionRecord> = Vec::new();
+    // Full parallel scan per file: msg_count used to stop early and report
+    // "6" for every session; now it's the real message count, and the preview
+    // is the first user message that actually has readable text.
+    let mut entries: Vec<SessionRecord> = filtered
+        .par_iter()
+        .filter_map(|file| {
+            let Ok(f) = std::fs::File::open(&file.path) else { return None };
+            let reader = std::io::BufReader::with_capacity(256 * 1024, f);
 
-    for file in &filtered {
-        let Ok(f) = std::fs::File::open(&file.path) else { continue };
-        let reader = std::io::BufReader::new(f);
+            let mut first_timestamp: Option<String> = None;
+            let mut last_timestamp: Option<String> = None;
+            let mut preview: Option<String> = None;
+            let mut msg_count = 0u32;
 
-        let mut first_timestamp = None;
-        let mut first_user_msg = None;
-        let mut msg_count = 0u32;
+            use std::io::BufRead;
+            for line in reader.lines() {
+                let Ok(line) = line else { continue };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(record) = serde_json::from_str::<Record>(&line) else { continue };
+                let Some(msg) = record.as_message() else { continue };
 
-        use std::io::BufRead;
-        for line in reader.lines() {
-            let Ok(line) = line else { continue };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<Record>(&line) else { continue };
-
-            if let Some(msg) = record.as_message() {
                 msg_count += 1;
-                if first_timestamp.is_none() {
-                    first_timestamp = msg.timestamp.clone();
+                if let Some(ts) = &msg.timestamp {
+                    if first_timestamp.is_none() {
+                        first_timestamp = Some(ts.clone());
+                    }
+                    last_timestamp = Some(ts.clone());
                 }
-                if first_user_msg.is_none() && matches!(record, Record::User(_)) {
+                if preview.is_none() && matches!(record, Record::User(_)) {
                     let text = msg.text_content();
-                    first_user_msg = Some(text.chars().take(120).collect::<String>());
+                    let head: String = text.chars().take(120).collect();
+                    if !head.trim().is_empty() {
+                        preview = Some(head);
+                    }
                 }
             }
 
-            if first_timestamp.is_some() && first_user_msg.is_some() && msg_count > 5 {
-                break;
-            }
-        }
-
-        // date filters
-        if let Some(after) = &opts.after {
-            if let Some(ts) = &first_timestamp {
-                if ts.as_str() < after.as_str() {
-                    continue;
+            // Date filters (against the session's first timestamp).
+            if opts.after.is_some() || before.is_some() {
+                let ts = first_timestamp.as_deref()?;
+                if let Some(after) = &opts.after {
+                    if ts < after.as_str() {
+                        return None;
+                    }
+                }
+                if let Some(before) = &before {
+                    if ts > before.as_str() {
+                        return None;
+                    }
                 }
             }
-        }
-        if let Some(before) = &opts.before {
-            if let Some(ts) = &first_timestamp {
-                if ts.as_str() > before.as_str() {
-                    continue;
-                }
-            }
-        }
 
-        entries.push(SessionRecord {
-            record_type: "session",
-            session_id: file.session_id.clone(),
-            project: file.project_name.clone(),
-            size_bytes: file.size_bytes,
-            size_human: file.size_human(),
-            timestamp: first_timestamp,
-            preview: first_user_msg,
-            msg_count,
-        });
-    }
+            Some(SessionRecord {
+                record_type: "session",
+                session_id: file.session_id.clone(),
+                project: file.project_name.clone(),
+                size_bytes: file.size_bytes,
+                size_human: file.size_human(),
+                timestamp: first_timestamp,
+                last_timestamp,
+                preview,
+                msg_count,
+            })
+        })
+        .collect();
 
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -130,11 +142,12 @@ pub fn run<W: Write>(opts: &SessionsOpts, files: &[SessionFile], em: &mut Emitte
     let summary = crate::output::SummaryRecord {
         record_type: "summary",
         count: show,
-        files_scanned: Some(entries.len()),
+        files_scanned: Some(filtered.len()),
         elapsed_ms: start.elapsed().as_millis(),
     };
-    em.emit(&summary)?;
+    // Always emitted — this is the record that signals truncation.
+    em.emit_always(&summary)?;
 
     em.flush()?;
-    Ok(())
+    Ok(show > 0)
 }

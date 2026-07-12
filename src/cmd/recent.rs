@@ -1,7 +1,9 @@
 /// smc recent — show most recent messages across all sessions.
+use std::collections::VecDeque;
 use std::io::Write;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::models::Record;
@@ -14,7 +16,6 @@ pub struct RecentOpts {
     pub limit: usize,
     pub role: Option<String>,
     pub project: Option<String>,
-    pub max_tokens: usize,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ struct RecentRecord {
     record_type: &'static str,
     project: String,
     session_id: String,
+    /// 1-based JSONL line number — feed to `smc context <session> <line>`.
+    line: usize,
     role: String,
     timestamp: String,
     text: String,
@@ -32,7 +35,10 @@ struct RecentRecord {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &RecentOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether any message was emitted.
+pub fn run<W: Write>(opts: &RecentOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
+    let start = std::time::Instant::now();
+
     let filtered: Vec<&SessionFile> = files
         .iter()
         .filter(|f| {
@@ -44,52 +50,58 @@ pub fn run<W: Write>(opts: &RecentOpts, files: &[SessionFile], em: &mut Emitter<
         })
         .collect();
 
-    let mut all: Vec<RecentRecord> = Vec::new();
+    // Per file: rolling window of the last `limit` messages that pass the
+    // filters. Filtering BEFORE the window matters — the old code kept the
+    // last N raw lines and filtered afterwards, so `--role user` under-filled
+    // whenever assistant/tool records dominated the tail.
+    let per_file: Vec<Vec<RecentRecord>> = filtered
+        .par_iter()
+        .map(|file| {
+            let mut buf: VecDeque<RecentRecord> = VecDeque::new();
+            let Ok(f) = std::fs::File::open(&file.path) else { return Vec::new() };
 
-    for file in &filtered {
-        let Ok(f) = std::fs::File::open(&file.path) else { continue };
-
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(f);
-
-        let mut last_lines: Vec<String> = Vec::new();
-        for line in reader.lines() {
-            let Ok(line) = line else { continue };
-            if line.trim().is_empty() {
-                continue;
-            }
-            last_lines.push(line);
-            if last_lines.len() > opts.limit * 2 + 50 {
-                last_lines.drain(..last_lines.len() - opts.limit - 25);
-            }
-        }
-
-        for line in last_lines.iter().rev().take(opts.limit + 10) {
-            let Ok(record) = serde_json::from_str::<Record>(line) else { continue };
-            let Some(msg) = record.as_message() else { continue };
-
-            let role = record.role().to_string();
-            if let Some(rf) = &opts.role {
-                if role != *rf {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::with_capacity(256 * 1024, f);
+            for (line_num, line) in reader.lines().enumerate() {
+                let Ok(line) = line else { continue };
+                if line.trim().is_empty() {
                     continue;
                 }
+                let Ok(record) = serde_json::from_str::<Record>(&line) else { continue };
+                let Some(msg) = record.as_message() else { continue };
+
+                let role = record.role();
+                if let Some(rf) = &opts.role {
+                    if role != rf.as_str() {
+                        continue;
+                    }
+                }
+
+                let text = msg.text_content();
+                let preview: String =
+                    text.chars().take(120).collect::<String>().replace('\n', " ");
+                if preview.trim().is_empty() {
+                    continue; // tool-result-only records carry no readable text
+                }
+
+                buf.push_back(RecentRecord {
+                    record_type: "recent",
+                    project: file.project_name.clone(),
+                    session_id: file.session_id.clone(),
+                    line: line_num + 1,
+                    role: role.to_string(),
+                    timestamp: msg.timestamp.clone().unwrap_or_default(),
+                    text: preview,
+                });
+                if buf.len() > opts.limit {
+                    buf.pop_front();
+                }
             }
+            buf.into_iter().collect()
+        })
+        .collect();
 
-            let ts = msg.timestamp.clone().unwrap_or_default();
-            let text = msg.text_content();
-            let preview: String = text.chars().take(120).collect::<String>().replace('\n', " ");
-
-            all.push(RecentRecord {
-                record_type: "recent",
-                project: file.project_name.clone(),
-                session_id: file.session_id.clone(),
-                role,
-                timestamp: ts,
-                text: preview,
-            });
-        }
-    }
-
+    let mut all: Vec<RecentRecord> = per_file.into_iter().flatten().collect();
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     let show = std::cmp::min(opts.limit, all.len());
@@ -103,10 +115,11 @@ pub fn run<W: Write>(opts: &RecentOpts, files: &[SessionFile], em: &mut Emitter<
         record_type: "summary",
         count: show,
         files_scanned: Some(filtered.len()),
-        elapsed_ms: 0,
+        elapsed_ms: start.elapsed().as_millis(),
     };
-    em.emit(&summary)?;
+    // Always emitted — this is the record that signals truncation.
+    em.emit_always(&summary)?;
 
     em.flush()?;
-    Ok(())
+    Ok(show > 0)
 }

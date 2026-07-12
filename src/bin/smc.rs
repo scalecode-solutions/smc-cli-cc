@@ -352,8 +352,9 @@ fn main() {
 fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
     let claude_dir = discover::claude_dir(cli.path.as_deref())?;
     let files = discover::discover_jsonl_files(&claude_dir)?;
+    let mut em = Emitter::stdout(max_tokens);
 
-    match cli.command {
+    let found = match cli.command {
         Commands::Search(args) => {
             let opts = cmd::search::SearchOpts {
                 queries: args.query,
@@ -372,7 +373,6 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 max_results: args.max,
                 include_smc: args.include_smc,
                 exclude_session: args.exclude_session,
-                max_tokens,
                 snippet_len: args.snippet_len,
                 sort: args.sort,
                 group_by: args.group_by,
@@ -380,8 +380,7 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 score: args.score,
                 context: args.context,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::search::run(&opts, &files, &mut em)?;
+            cmd::search::run(&opts, &files, &mut em)?
         }
 
         Commands::Sessions(args) => {
@@ -391,67 +390,45 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 after: args.after,
                 before: args.before,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::sessions::run(&opts, &files, &mut em)?;
+            cmd::sessions::run(&opts, &files, &mut em)?
         }
 
         Commands::Show(args) => {
             let file = discover::find_session(&files, &args.session)?;
             let opts = cmd::show::ShowOpts {
-                session: args.session,
                 thinking: args.thinking,
                 from: args.from,
                 to: args.to,
-                max_tokens,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::show::run(&opts, file, &mut em)?;
+            cmd::show::run(&opts, file, &mut em)?
         }
 
         Commands::Tools(args) => {
             let file = discover::find_session(&files, &args.session)?;
-            let opts = cmd::tools::ToolsOpts {
-                session: args.session,
-                max_tokens,
-            };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::tools::run(&opts, file, &mut em)?;
+            cmd::tools::run(file, &mut em)?
         }
 
-        Commands::Stats => {
-            let opts = cmd::stats::StatsOpts { max_tokens };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::stats::run(&opts, &files, &mut em)?;
-        }
+        Commands::Stats => cmd::stats::run(&files, &mut em)?,
 
         Commands::Export(args) => {
             let file = discover::find_session(&files, &args.session)?;
             let opts = cmd::export::ExportOpts {
-                session: args.session,
                 to_stdout: args.output,
                 md_path: args.md,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::export::run(&opts, file, &mut em)?;
+            cmd::export::run(&opts, file, &mut em)?
         }
 
         Commands::Context(args) => {
             let file = discover::find_session(&files, &args.session)?;
             let opts = cmd::context::ContextOpts {
-                session: args.session,
                 line: args.line,
                 context: args.context,
-                max_tokens,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::context::run(&opts, file, &mut em)?;
+            cmd::context::run(&opts, file, &mut em)?
         }
 
-        Commands::Projects => {
-            let opts = cmd::projects::ProjectsOpts { max_tokens };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::projects::run(&opts, &files, &mut em)?;
-        }
+        Commands::Projects => cmd::projects::run(&files, &mut em)?,
 
         Commands::Freq(args) => {
             let mode = cmd::freq::FreqMode::parse(&args.mode)?;
@@ -459,10 +436,8 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 mode,
                 limit: args.limit,
                 raw: args.raw,
-                max_tokens,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::freq::run(&opts, &files, &mut em)?;
+            cmd::freq::run(&opts, &files, &mut em)?
         }
 
         Commands::Recent(args) => {
@@ -470,12 +445,10 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 limit: args.limit,
                 role: args.role,
                 project: args.project,
-                max_tokens,
             };
-            let mut em = Emitter::stdout(max_tokens);
-            cmd::recent::run(&opts, &files, &mut em)?;
+            cmd::recent::run(&opts, &files, &mut em)?
         }
-    }
+    };
 
-    Ok(true)
+    Ok(found)
 }

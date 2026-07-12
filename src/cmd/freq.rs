@@ -18,7 +18,6 @@ pub struct FreqOpts {
     pub mode: FreqMode,
     pub limit: usize,
     pub raw: bool,
-    pub max_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,33 +73,35 @@ struct FreqSummary {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &FreqOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether anything was counted.
+pub fn run<W: Write>(opts: &FreqOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
     let start = std::time::Instant::now();
 
-    match opts.mode {
+    let total = match opts.mode {
         FreqMode::Chars if opts.raw => run_chars_raw(files, em)?,
         FreqMode::Chars => run_chars_parsed(files, em)?,
         FreqMode::Words => run_words(files, opts.limit, em)?,
         FreqMode::Tools => run_tools(files, opts.limit, em)?,
         FreqMode::Roles => run_roles(files, em)?,
-    }
+    };
 
     let summary = FreqSummary {
         record_type: "summary",
         mode: format!("{:?}", opts.mode).to_lowercase(),
-        total: 0,
+        total,
         files_scanned: files.len(),
         elapsed_ms: start.elapsed().as_millis(),
     };
-    em.emit(&summary)?;
+    // Always emitted — this is the record that signals truncation.
+    em.emit_always(&summary)?;
 
     em.flush()?;
-    Ok(())
+    Ok(total > 0)
 }
 
 // ── Chars (parsed) ─────────────────────────────────────────────────────────
 
-fn run_chars_parsed<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+fn run_chars_parsed<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<u64> {
     let counts: Vec<AtomicU64> = (0..26).map(|_| AtomicU64::new(0)).collect();
 
     files.par_iter().for_each(|file| {
@@ -129,7 +130,7 @@ fn run_chars_parsed<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Res
 
 // ── Chars (raw) ────────────────────────────────────────────────────────────
 
-fn run_chars_raw<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+fn run_chars_raw<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<u64> {
     let counts: Vec<AtomicU64> = (0..26).map(|_| AtomicU64::new(0)).collect();
 
     files.par_iter().for_each(|file| {
@@ -148,7 +149,7 @@ fn run_chars_raw<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result
     emit_char_counts(&counts, em)
 }
 
-fn emit_char_counts<W: Write>(counts: &[AtomicU64], em: &mut Emitter<W>) -> Result<()> {
+fn emit_char_counts<W: Write>(counts: &[AtomicU64], em: &mut Emitter<W>) -> Result<u64> {
     let totals: Vec<u64> = counts.iter().map(|c| c.load(Ordering::Relaxed)).collect();
     let grand_total: u64 = totals.iter().sum();
 
@@ -166,12 +167,12 @@ fn emit_char_counts<W: Write>(counts: &[AtomicU64], em: &mut Emitter<W>) -> Resu
         }
     }
 
-    Ok(())
+    Ok(grand_total)
 }
 
 // ── Words ──────────────────────────────────────────────────────────────────
 
-fn run_words<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>) -> Result<()> {
+fn run_words<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>) -> Result<u64> {
     let word_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 
     files.par_iter().for_each(|file| {
@@ -216,12 +217,12 @@ fn run_words<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>)
         }
     }
 
-    Ok(())
+    Ok(grand_total)
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
 
-fn run_tools<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>) -> Result<()> {
+fn run_tools<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>) -> Result<u64> {
     let tool_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 
     files.par_iter().for_each(|file| {
@@ -263,12 +264,12 @@ fn run_tools<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>)
         }
     }
 
-    Ok(())
+    Ok(grand_total)
 }
 
 // ── Roles ──────────────────────────────────────────────────────────────────
 
-fn run_roles<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+fn run_roles<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<u64> {
     let role_counts: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
 
     files.par_iter().for_each(|file| {
@@ -309,5 +310,5 @@ fn run_roles<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<()>
         }
     }
 
-    Ok(())
+    Ok(grand_total)
 }

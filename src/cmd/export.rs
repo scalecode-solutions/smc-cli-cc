@@ -11,7 +11,6 @@ use crate::util::discover::SessionFile;
 // ── Opts ───────────────────────────────────────────────────────────────────
 
 pub struct ExportOpts {
-    pub session: String,
     /// Write markdown to stdout (via emitter raw lines).
     pub to_stdout: bool,
     /// Save markdown to this file path.
@@ -33,7 +32,7 @@ struct ExportDone {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<()> {
+pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<bool> {
     let records = crate::cmd::parse_records(file)?;
 
     let mut md = String::new();
@@ -44,7 +43,7 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
 
     let mut msg_count = 0usize;
 
-    for record in &records {
+    for (_, record) in &records {
         let Some(msg) = record.as_message() else { continue };
         msg_count += 1;
 
@@ -123,5 +122,5 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
     }
 
     em.flush()?;
-    Ok(())
+    Ok(msg_count > 0)
 }

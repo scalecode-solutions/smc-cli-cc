@@ -11,10 +11,8 @@ use crate::util::discover::SessionFile;
 // ── Opts ───────────────────────────────────────────────────────────────────
 
 pub struct ContextOpts {
-    pub session: String,
     pub line: usize,
     pub context: usize,
-    pub max_tokens: usize,
 }
 
 // ── Records ────────────────────────────────────────────────────────────────
@@ -33,7 +31,8 @@ struct ContextRecord {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(opts: &ContextOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<()> {
+/// Returns whether any context message was emitted.
+pub fn run<W: Write>(opts: &ContextOpts, file: &SessionFile, em: &mut Emitter<W>) -> Result<bool> {
     let f = std::fs::File::open(&file.path)?;
     let reader = std::io::BufReader::new(f);
 
@@ -59,6 +58,7 @@ pub fn run<W: Write>(opts: &ContextOpts, file: &SessionFile, em: &mut Emitter<W>
     let start = target_idx.saturating_sub(opts.context);
     let end = std::cmp::min(messages.len(), target_idx + opts.context + 1);
 
+    let mut emitted = false;
     for (i, (line_num, record)) in messages[start..end].iter().enumerate() {
         let msg = record.as_message().unwrap();
         let text = msg.text_content();
@@ -76,8 +76,9 @@ pub fn run<W: Write>(opts: &ContextOpts, file: &SessionFile, em: &mut Emitter<W>
         if !em.emit(&rec)? {
             break;
         }
+        emitted = true;
     }
 
     em.flush()?;
-    Ok(())
+    Ok(emitted)
 }

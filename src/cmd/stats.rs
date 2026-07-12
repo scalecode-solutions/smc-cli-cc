@@ -8,12 +8,6 @@ use serde::Serialize;
 use crate::output::Emitter;
 use crate::util::discover::SessionFile;
 
-// ── Opts ───────────────────────────────────────────────────────────────────
-
-pub struct StatsOpts {
-    pub max_tokens: usize,
-}
-
 // ── Records ────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Debug)]
@@ -37,7 +31,7 @@ struct ProjectStat {
 
 // ── run ────────────────────────────────────────────────────────────────────
 
-pub fn run<W: Write>(_opts: &StatsOpts, files: &[SessionFile], em: &mut Emitter<W>) -> Result<()> {
+pub fn run<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool> {
     let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
 
     let mut projects: HashMap<String, (usize, u64)> = HashMap::new();
@@ -72,7 +66,7 @@ pub fn run<W: Write>(_opts: &StatsOpts, files: &[SessionFile], em: &mut Emitter<
 
     em.emit(&rec)?;
     em.flush()?;
-    Ok(())
+    Ok(!files.is_empty())
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
