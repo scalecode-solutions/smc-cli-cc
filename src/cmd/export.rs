@@ -65,7 +65,8 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
                             md.push_str(text);
                             md.push_str("\n\n");
                         }
-                        ContentBlock::Thinking { thinking } => {
+                        // Empty thinking (signature-only) renders as noise — skip.
+                        ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
                             md.push_str(&format!(
                                 "<details>\n<summary>Thinking</summary>\n\n{}\n\n</details>\n\n",
                                 thinking

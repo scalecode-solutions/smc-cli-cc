@@ -177,6 +177,8 @@ impl MessageRecord {
     }
 
     /// All text content (text blocks + thinking; tool use/results excluded).
+    /// Empty thinking blocks (signature-only — Claude Code does not persist
+    /// thinking text) are skipped so they don't inject stray blank lines.
     pub fn text_content(&self) -> String {
         match self.content_view() {
             ContentView::Text(s) => s.to_string(),
@@ -185,7 +187,9 @@ impl MessageRecord {
                 for block in blocks {
                     match block {
                         ContentBlock::Text { text } => parts.push(text.as_str()),
-                        ContentBlock::Thinking { thinking } => parts.push(thinking.as_str()),
+                        ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
+                            parts.push(thinking.as_str())
+                        }
                         _ => {}
                     }
                 }
@@ -193,6 +197,12 @@ impl MessageRecord {
             }
             ContentView::None => String::new(),
         }
+    }
+
+    /// Whether the message carries any thinking blocks (empty or not).
+    pub fn has_thinking_blocks(&self) -> bool {
+        matches!(self.content_view(), ContentView::Blocks(blocks)
+            if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
     }
 
     /// Text content excluding thinking blocks.
@@ -212,14 +222,16 @@ impl MessageRecord {
         }
     }
 
-    /// Only thinking block content.
+    /// Only thinking block content (empty blocks skipped).
     pub fn thinking_content(&self) -> String {
         match self.content_view() {
             ContentView::Blocks(blocks) => {
                 let mut parts = Vec::new();
                 for block in blocks {
                     if let ContentBlock::Thinking { thinking } = block {
-                        parts.push(thinking.as_str());
+                        if !thinking.is_empty() {
+                            parts.push(thinking.as_str());
+                        }
                     }
                 }
                 parts.join("\n")
@@ -285,7 +297,9 @@ impl MessageRecord {
                 for block in blocks {
                     match block {
                         ContentBlock::Text { text } => parts.push(text.clone()),
-                        ContentBlock::Thinking { thinking } => parts.push(thinking.clone()),
+                        ContentBlock::Thinking { thinking } if !thinking.is_empty() => {
+                            parts.push(thinking.clone())
+                        }
                         ContentBlock::ToolUse { name, input, .. } => {
                             parts.push(format!("[tool: {}] {}", name, json_string_values(input)));
                         }

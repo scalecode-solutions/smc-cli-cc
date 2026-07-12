@@ -105,7 +105,7 @@ fn build_message_out(
                 match block {
                     ContentBlock::Text { text } => text_parts.push(text.clone()),
                     ContentBlock::Thinking { thinking } => {
-                        if include_thinking {
+                        if include_thinking && !thinking.is_empty() {
                             thinking_text = Some(thinking.clone());
                         }
                     }

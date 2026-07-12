@@ -514,6 +514,68 @@ fn exclude_live_skips_freshly_written_sessions() {
     assert!(!found);
 }
 
+#[test]
+fn empty_thinking_blocks_are_invisible_and_explained() {
+    // Claude Code persists thinking signatures with EMPTY text. That must not
+    // inject blank lines, empty export sections, or silent zero-result
+    // --thinking searches.
+    let mut c = TempCorpus::new("emptythink");
+    c.add_session(
+        "zzt1",
+        "p",
+        &[json!({
+            "type": "assistant", "uuid": "a1", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "abc123"},
+                {"type": "text", "text": "visible reply"}
+            ]}
+        })
+        .to_string()],
+    );
+
+    // Full-content search text has no stray leading newline from the empty block.
+    let (_, records, _) = search(&opts(&["visible reply"]), &c.files, 0);
+    assert_eq!(records[0]["match_offset"], 0, "empty thinking must not shift offsets");
+
+    // --thinking search warns that thinking text is never persisted.
+    let mut o = opts(&["anything"]);
+    o.thinking_only = true;
+    let mut em = Emitter::capturing(0);
+    cmd::search::run(&o, &c.files, &mut em).unwrap();
+    let recs = em.into_records();
+    let w = recs.iter().find(|r| r["type"] == "warning").expect("warning expected");
+    assert!(w["message"].as_str().unwrap().contains("signatures only"));
+
+    // show --thinking omits the empty block entirely.
+    let so = cmd::show::ShowOpts { thinking: true, from: None, to: None };
+    let mut em = Emitter::capturing(0);
+    cmd::show::run(&so, &c.files[0], &mut em).unwrap();
+    let msg = em.into_records().into_iter().find(|r| r["type"] == "message").unwrap();
+    assert!(msg.get("thinking").is_none_or(|t| t.is_null()));
+}
+
+#[test]
+fn nonempty_thinking_still_searchable_without_warning() {
+    let mut c = TempCorpus::new("realthink");
+    c.add_session(
+        "zzt2",
+        "p",
+        &[json!({
+            "type": "assistant", "uuid": "a1", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "secretly considering the needle approach"},
+                {"type": "text", "text": "public answer"}
+            ]}
+        })
+        .to_string()],
+    );
+    let mut o = opts(&["needle approach"]);
+    o.thinking_only = true;
+    let (found, records, _) = search(&o, &c.files, 0);
+    assert!(found);
+    assert!(records[0]["text"].as_str().unwrap().contains("considering"));
+}
+
 // ── Adversarial corpora ────────────────────────────────────────────────────
 
 #[test]

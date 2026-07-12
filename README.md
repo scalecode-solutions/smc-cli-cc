@@ -93,7 +93,7 @@ smc search "cargo test" --exclude-live             # Skip the conversation runni
 | `--max <N>` | `-n` | Maximum results — groups in group mode (default: 50) |
 | `--file <PATH>` | | Filter to messages that touch a file path |
 | `--tool-input` | | Search only within tool input content |
-| `--thinking` | | Search only within thinking blocks |
+| `--thinking` | | Search only within thinking blocks (see note below) |
 | `--no-thinking` | | Exclude thinking blocks from search |
 | `--sort <MODE>` | | Order results: `document` (default), `recency`, `oldest`, `relevance` |
 | `--score` | | Attach a BM25 relevance score to each match (implied by `--sort relevance`) |
@@ -117,6 +117,7 @@ smc search "cargo test" --exclude-live             # Skip the conversation runni
 - **Query semantics**: separate words are OR'd (use `-a` for AND, `--sort relevance` for BM25 ranking); a single quoted multi-word argument — or `-F`/`--phrase` — matches as one exact substring. A zero-match multi-word query emits a `warning` record explaining the distinction.
 - **`--dedupe`** collapses matches whose snippets are byte-identical (system-reminder boilerplate echoed into many sessions), keeping the first per sort order; the summary reports how many were dropped in `deduped` while `total_matched` stays raw.
 - **Tool inputs and results are searched as text**: Write/Edit file content, Bash commands, and tool-result output are extracted from their JSON containers, so multiline and quoted phrases match naturally.
+- **Thinking caveat**: current Claude Code versions persist thinking *signatures* only — the text is empty in the logs. Empty thinking blocks are skipped everywhere (search text, show, export), and a zero-match `--thinking` search emits a `warning` explaining this rather than looking like a clean miss.
 
 ### AI-Friendly Features
 
@@ -139,7 +140,7 @@ Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag
 All output is JSON Lines — one record per line, zero ANSI, zero pagination. Every stream opens with a `meta` record and search closes with a `summary`:
 
 ```jsonl
-{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.9.1"}
+{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.9.2"}
 {"type":"match","project":"myapp","session_id":"394afc...","line":42,"uuid":"a1b2...","role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","score":3.41,"text":"…centered on the match…","match_offset":1014,"msg_chars":1293}
 {"type":"summary","query":"deploy","count":2,"total_matched":2,"files_scanned":293,"truncated":false,"capped":false,"elapsed_ms":3}
 ```
