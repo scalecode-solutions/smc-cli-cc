@@ -200,7 +200,7 @@ fn run_words<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>)
 
     let counts = word_counts.into_inner().unwrap();
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     let grand_total: u64 = sorted.iter().map(|(_, c)| c).sum();
 
@@ -247,7 +247,7 @@ fn run_tools<W: Write>(files: &[SessionFile], limit: usize, em: &mut Emitter<W>)
 
     let counts = tool_counts.into_inner().unwrap();
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     let grand_total: u64 = sorted.iter().map(|(_, c)| c).sum();
 
@@ -293,7 +293,7 @@ fn run_roles<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<u64
 
     let counts = role_counts.into_inner().unwrap();
     let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     let grand_total: u64 = sorted.iter().map(|(_, c)| c).sum();
 

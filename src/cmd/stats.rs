@@ -42,7 +42,7 @@ pub fn run<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool>
     }
 
     let mut sorted: Vec<_> = projects.into_iter().collect();
-    sorted.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    sorted.sort_by_key(|(_, (_, size))| std::cmp::Reverse(*size));
 
     let project_stats: Vec<ProjectStat> = sorted
         .iter()

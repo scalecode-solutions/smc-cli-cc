@@ -5,7 +5,7 @@
 /// Approximate token count for a string.
 #[inline]
 pub fn approx(byte_len: usize) -> usize {
-    (byte_len + 3) / 4
+    byte_len.div_ceil(4)
 }
 
 /// Approximate token count for a serialised record (adds one for trailing newline).

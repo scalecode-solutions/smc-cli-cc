@@ -236,9 +236,9 @@ impl Matcher {
         if self.and_mode {
             let mut min_pos = usize::MAX;
             for q in &self.plains {
-                match lower.find(q.as_str()) {
-                    Some(b) => min_pos = min_pos.min(lower[..b].chars().count()),
-                    None => return None,
+                {
+                    let b = lower.find(q.as_str())?;
+                    min_pos = min_pos.min(lower[..b].chars().count())
                 }
             }
             Some(MatchInfo {
@@ -264,12 +264,10 @@ impl Matcher {
             let mut hits = Vec::new();
             let mut min_pos = usize::MAX;
             for re in &self.regexes {
-                match re.find(text) {
-                    Some(m) => {
-                        hits.push(m.as_str().to_string());
-                        min_pos = min_pos.min(text[..m.start()].chars().count());
-                    }
-                    None => return None,
+                {
+                    let m = re.find(text)?;
+                    hits.push(m.as_str().to_string());
+                    min_pos = min_pos.min(text[..m.start()].chars().count());
                 }
             }
             Some(MatchInfo {

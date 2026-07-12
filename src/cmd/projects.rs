@@ -57,10 +57,10 @@ pub fn run<W: Write>(files: &[SessionFile], em: &mut Emitter<W>) -> Result<bool>
                     if let Some(msg) = record.as_message() {
                         if let Some(ts) = &msg.timestamp {
                             let ts_date = ts.get(..10).unwrap_or(ts);
-                            if entry.earliest.as_deref().map_or(true, |e| ts_date < e) {
+                            if entry.earliest.as_deref().is_none_or(|e| ts_date < e) {
                                 entry.earliest = Some(ts_date.to_string());
                             }
-                            if entry.latest.as_deref().map_or(true, |l| ts_date > l) {
+                            if entry.latest.as_deref().is_none_or(|l| ts_date > l) {
                                 entry.latest = Some(ts_date.to_string());
                             }
                             break;
