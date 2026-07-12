@@ -72,6 +72,7 @@ smc search "auth" --score                          # Attach a BM25 score to each
 smc search "migration" --group-by session          # Collapse hits per session
 smc search "labor" --group-by thread               # Collapse hits per conversation thread
 smc search "schema" --snippet-len 200              # Wider match-centered snippets
+smc search "regression" -C 2                       # Inline ±2 surrounding messages per match
 ```
 
 ### Search Flags
@@ -96,6 +97,7 @@ smc search "schema" --snippet-len 200              # Wider match-centered snippe
 | `--snippet-len <N>` | | Max characters per match snippet, centered on the match (default: 500) |
 | `--group-by <MODE>` | | Collapse matches into groups: `session` or `thread` |
 | `--group-samples <N>` | | Sample matches to include per group (default: 3) |
+| `--context <N>` | `-C` | Inline N surrounding messages per match (default: 0) |
 | `--include-smc` | `-i` | Include previous smc output (excluded by default) |
 | `--exclude-session <ID>` | | Skip a specific session |
 
@@ -104,6 +106,8 @@ smc search "schema" --snippet-len 200              # Wider match-centered snippe
 - **`--sort`** orders results. `recency`/`oldest` sort by message timestamp; `relevance` ranks by BM25 (term frequency × inverse document frequency, normalized by message length). The result cap (`--max`) is applied **after** sorting, so `--sort recency --max 10` returns the 10 *most recent* matches, not 10 arbitrary ones.
 - **Snippets are centered on the match**, not truncated from the start — so the matching text is always visible. Each match also reports `match_offset` (where the hit is) and `msg_chars` (full message length).
 - **`--group-by`** collapses many hits about one conversation into a single `group` record (hit count, timestamp range, and a few sample snippets). `thread` resolves each match's conversation thread by walking the `parentUuid` chain to its root, separating a long session into its distinct threads.
+- **`--context N`** attaches `context_before`/`context_after` arrays to each match — up to N surrounding messages each, with `line`, `role`, `timestamp`, and a 200-char text preview. Context shows the *conversation* around a hit, so it deliberately ignores role/tool/date filters. Often replaces a follow-up `smc context` call entirely.
+- **Date filters** treat a bare `--before YYYY-MM-DD` as inclusive of that whole day, and messages without timestamps are excluded whenever a date filter is active.
 
 ### AI-Friendly Features
 
@@ -123,7 +127,7 @@ Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag
 All output is JSON Lines — one record per line, zero ANSI, zero pagination. Every stream opens with a `meta` record and search closes with a `summary`:
 
 ```jsonl
-{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.8.9"}
+{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.9.0"}
 {"type":"match","project":"myapp","session_id":"394afc...","line":42,"uuid":"a1b2...","role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","score":3.41,"text":"…centered on the match…","match_offset":1014,"msg_chars":1293}
 {"type":"summary","query":"deploy","count":2,"total_matched":2,"files_scanned":293,"truncated":false,"capped":false,"elapsed_ms":3}
 ```
@@ -134,7 +138,11 @@ With `--group-by`, matches are replaced by `group` records:
 {"type":"group","group_by":"session","key":"394afc...","project":"myapp","session_id":"394afc...","hits":12,"first_ts":"2026-02-10T15:30:00Z","last_ts":"2026-02-10T16:05:00Z","samples":[{"line":42,"timestamp":"...","text":"..."}]}
 ```
 
-Field notes: `score` (BM25) appears only when scoring is on; `match_offset`/`msg_chars` tell you where the hit is and how much the snippet omits; the summary's `total_matched` is the true match count, `truncated` flags token-budget cutoff, and `capped` flags that `--max` hid more. The `summary` is always emitted, even when truncated.
+Field notes: `score` (BM25) appears only when scoring is on; `match_offset`/`msg_chars` tell you where the hit is and how much the snippet omits; `context_before`/`context_after` appear only with `--context N`; the summary's `total_matched` is the true match count, `truncated` flags token-budget cutoff, and `capped` flags that `--max` hid more. Summaries are always emitted, even when truncated — on every command.
+
+Exit codes are real signals: `0` = matches/results found, `1` = clean run with no results, `2` = error.
+
+Project names are read from the `cwd` field of the session records themselves (exact, even for dash/dot-containing directory names), not from the lossy dash-encoded directory name.
 
 Every command emits typed records with a `type` field. Pipe through `jq` for formatting:
 
@@ -158,7 +166,7 @@ smc sessions --after 2026-02-01        # After a date
 # View a conversation
 smc show 394afc                        # Emit as JSONL message records
 smc show 394afc --thinking             # Include thinking blocks
-smc show 394afc --from 5 --to 15       # Specific message range
+smc show 394afc --from 5 --to 15       # Specific message range (by message index)
 
 # Drill into search results
 smc context 394afc 50                  # Messages around line 50
@@ -177,6 +185,8 @@ smc recent                             # Last 10 across all sessions
 smc recent -p MyProject                # Filter by project
 smc recent --role user                 # Only user messages
 ```
+
+Records from `show`, `tools`, and `recent` carry the JSONL `line` number (and `uuid` where available), so any of them can be fed straight into `smc context <session> <line>`. `sessions` records include an exact full-scan `msg_count`, `last_timestamp`, and a `preview` taken from the first user message with readable text.
 
 ---
 
