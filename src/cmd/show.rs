@@ -11,7 +11,6 @@ use crate::util::discover::SessionFile;
 // ── Opts ───────────────────────────────────────────────────────────────────
 
 pub struct ShowOpts {
-    pub thinking: bool,
     pub from: Option<usize>,
     pub to: Option<usize>,
 }
@@ -65,7 +64,7 @@ pub fn run<W: Write>(opts: &ShowOpts, file: &SessionFile, em: &mut Emitter<W>) -
 
         if in_range {
             let msg = record.as_message().unwrap();
-            let out = build_message_out(record, msg, index, *line, opts.thinking);
+            let out = build_message_out(record, msg, index, *line);
             if !em.emit(&out)? {
                 break;
             }
@@ -92,7 +91,6 @@ fn build_message_out(
     msg: &crate::models::MessageRecord,
     index: usize,
     line: usize,
-    include_thinking: bool,
 ) -> MessageOut {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
@@ -104,8 +102,10 @@ fn build_message_out(
             for block in blocks {
                 match block {
                     ContentBlock::Text { text } => text_parts.push(text.clone()),
+                    // Included whenever text exists (Claude Code persists
+                    // signatures only, so this fires on legacy logs at most).
                     ContentBlock::Thinking { thinking } => {
-                        if include_thinking && !thinking.is_empty() {
+                        if !thinking.is_empty() {
                             thinking_text = Some(thinking.clone());
                         }
                     }

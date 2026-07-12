@@ -49,8 +49,6 @@ pub struct SearchOpts {
     pub branch: Option<String>,
     pub file: Option<String>,
     pub tool_input: bool,
-    pub thinking_only: bool,
-    pub no_thinking: bool,
     pub max_results: usize,
     pub include_smc: bool,
     pub exclude_session: Option<String>,
@@ -339,22 +337,16 @@ struct CorpusStats {
     total_len: usize,
     /// Document frequency per query term (how many docs contain it).
     df: Vec<usize>,
-    /// --thinking diagnostics: messages with thinking blocks / with non-empty
-    /// thinking text (Claude Code often persists signatures only).
-    thinking_seen: usize,
-    thinking_nonempty: usize,
 }
 
 impl CorpusStats {
     fn new(terms: usize) -> Self {
-        Self { docs: 0, total_len: 0, df: vec![0; terms], thinking_seen: 0, thinking_nonempty: 0 }
+        Self { docs: 0, total_len: 0, df: vec![0; terms] }
     }
 
     fn merge(&mut self, other: &CorpusStats) {
         self.docs += other.docs;
         self.total_len += other.total_len;
-        self.thinking_seen += other.thinking_seen;
-        self.thinking_nonempty += other.thinking_nonempty;
         if self.df.len() < other.df.len() {
             self.df.resize(other.df.len(), 0);
         }
@@ -514,24 +506,6 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         }
         (count, intended, capped)
     };
-
-    // A zero-match --thinking search over blocks that are ALL empty is not a
-    // clean "no results" — the logs simply never contained thinking text.
-    if opts.thinking_only
-        && total_matched == 0
-        && corpus.thinking_seen > 0
-        && corpus.thinking_nonempty == 0
-    {
-        em.warn(
-            None,
-            &format!(
-                "all {} thinking blocks scanned are empty — this Claude Code \
-                 version persists thinking signatures only (no text), so \
-                 --thinking cannot match anything in these logs",
-                corpus.thinking_seen
-            ),
-        );
-    }
 
     // A single multi-word query is an exact-substring match — a common trap
     // when the caller expected web-search semantics. Say so on zero hits.
@@ -771,24 +745,11 @@ fn search_file(
 
             // -- select search text --
 
-            let text = if opts.thinking_only {
-                msg.thinking_content()
-            } else if opts.no_thinking {
-                msg.text_no_thinking()
-            } else if opts.tool_input {
+            let text = if opts.tool_input {
                 msg.tool_input_content()
             } else {
                 msg.full_content()
             };
-
-            // Track whether thinking text exists at all, so a zero-match
-            // --thinking search can be explained instead of looking clean.
-            if opts.thinking_only && msg.has_thinking_blocks() {
-                corpus.thinking_seen += 1;
-                if !text.is_empty() {
-                    corpus.thinking_nonempty += 1;
-                }
-            }
 
             if text.is_empty() {
                 break 'this_msg;

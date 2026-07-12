@@ -199,47 +199,6 @@ impl MessageRecord {
         }
     }
 
-    /// Whether the message carries any thinking blocks (empty or not).
-    pub fn has_thinking_blocks(&self) -> bool {
-        matches!(self.content_view(), ContentView::Blocks(blocks)
-            if blocks.iter().any(|b| matches!(b, ContentBlock::Thinking { .. })))
-    }
-
-    /// Text content excluding thinking blocks.
-    pub fn text_no_thinking(&self) -> String {
-        match self.content_view() {
-            ContentView::Text(s) => s.to_string(),
-            ContentView::Blocks(blocks) => {
-                let mut parts = Vec::new();
-                for block in blocks {
-                    if let ContentBlock::Text { text } = block {
-                        parts.push(text.as_str());
-                    }
-                }
-                parts.join("\n")
-            }
-            ContentView::None => String::new(),
-        }
-    }
-
-    /// Only thinking block content (empty blocks skipped).
-    pub fn thinking_content(&self) -> String {
-        match self.content_view() {
-            ContentView::Blocks(blocks) => {
-                let mut parts = Vec::new();
-                for block in blocks {
-                    if let ContentBlock::Thinking { thinking } = block {
-                        if !thinking.is_empty() {
-                            parts.push(thinking.as_str());
-                        }
-                    }
-                }
-                parts.join("\n")
-            }
-            _ => String::new(),
-        }
-    }
-
     /// Only tool input content (name + the input's string values as text).
     pub fn tool_input_content(&self) -> String {
         match self.content_view() {

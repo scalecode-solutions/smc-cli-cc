@@ -81,10 +81,10 @@ enum Commands {
 #[derive(Parser)]
 #[command(
     about = "Parallel full-text search across all conversations",
-    long_about = "Parallel full-text search across every message, tool call, tool result, \
-                  and thinking block in your Claude Code conversation logs. Supports \
-                  multi-term OR/AND, regex, role/tool/project/date/branch filters, \
-                  file-path matching, and thinking-block isolation."
+    long_about = "Parallel full-text search across every message, tool call, and tool \
+                  result in your Claude Code conversation logs. Supports multi-term \
+                  OR/AND, exact phrases, regex, BM25 ranking, and role/tool/project/\
+                  date/branch/file filters."
 )]
 struct SearchArgs {
     /// Search queries (multiple terms are OR'd together)
@@ -141,14 +141,6 @@ struct SearchArgs {
     /// Search only within tool input content
     #[arg(long)]
     tool_input: bool,
-
-    /// Search only within thinking blocks
-    #[arg(long)]
-    thinking: bool,
-
-    /// Exclude thinking blocks from search
-    #[arg(long)]
-    no_thinking: bool,
 
     /// Max characters per match snippet, centered on the match
     #[arg(long, default_value = "500")]
@@ -221,16 +213,12 @@ struct SessionsArgs {
 #[command(
     about = "Pretty-print a conversation as JSONL message records",
     long_about = "Emit every message in a session as structured JSONL. Each record \
-                  includes role, timestamp, text content, and tool calls. Use --thinking \
-                  to include thinking blocks, --from/--to to slice by message index."
+                  includes line number, uuid, role, timestamp, text content, and tool \
+                  calls. Use --from/--to to slice by message index."
 )]
 struct ShowArgs {
     /// Session ID (or prefix)
     session: String,
-
-    /// Include thinking blocks
-    #[arg(long)]
-    thinking: bool,
 
     /// Start from this message number
     #[arg(long)]
@@ -381,8 +369,6 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 branch: args.branch,
                 file: args.file,
                 tool_input: args.tool_input,
-                thinking_only: args.thinking,
-                no_thinking: args.no_thinking,
                 max_results: args.max,
                 include_smc: args.include_smc,
                 exclude_session: args.exclude_session,
@@ -412,7 +398,6 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
         Commands::Show(args) => {
             let file = discover::find_session(&files, &args.session)?;
             let opts = cmd::show::ShowOpts {
-                thinking: args.thinking,
                 from: args.from,
                 to: args.to,
             };
