@@ -173,6 +173,19 @@ struct SearchArgs {
     /// Include N surrounding messages per match as inline context
     #[arg(long, short = 'C', value_name = "N", default_value = "0")]
     context: usize,
+
+    /// Treat all query words as ONE exact phrase (substring match)
+    #[arg(long, short = 'F', conflicts_with = "regex")]
+    phrase: bool,
+
+    /// Collapse matches with identical snippets (keeps the first per sort order)
+    #[arg(long)]
+    dedupe: bool,
+
+    /// Skip sessions written in the last SECS seconds (default 120) —
+    /// excludes the live conversation invoking smc from its own results
+    #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "120")]
+    exclude_live: Option<u64>,
 }
 
 // ── sessions ───────────────────────────────────────────────────────────────
@@ -379,6 +392,9 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
                 group_samples: args.group_samples,
                 score: args.score,
                 context: args.context,
+                phrase: args.phrase,
+                dedupe: args.dedupe,
+                exclude_live: args.exclude_live,
             };
             cmd::search::run(&opts, &files, &mut em)?
         }

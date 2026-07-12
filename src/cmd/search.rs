@@ -68,6 +68,16 @@ pub struct SearchOpts {
     /// ignore role/tool/date filters — they are the conversation, not the
     /// filtered view.
     pub context: usize,
+    /// Join all query words into ONE exact phrase (substring match).
+    pub phrase: bool,
+    /// Collapse matches whose snippets are identical (repeated CLAUDE.md
+    /// echoes, boilerplate) — keeps the first per sort order.
+    pub dedupe: bool,
+    /// Skip session files modified within the last N seconds — i.e. the
+    /// live conversation that is invoking smc, whose own commands would
+    /// otherwise self-match. None = off. (Transcript writes are debounced,
+    /// so the window needs slack; the CLI default is 120s.)
+    pub exclude_live: Option<u64>,
 }
 
 /// Character cap for each inline context message preview.
@@ -166,6 +176,9 @@ struct SearchSummary {
     truncated: bool,
     /// True when `--max-results` may have hidden additional matches.
     capped: bool,
+    /// Matches collapsed by --dedupe (present only when deduping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deduped: Option<usize>,
     elapsed_ms: u128,
 }
 
@@ -374,7 +387,14 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
     anyhow::ensure!(!opts.queries.is_empty(), "search query cannot be empty");
 
     let start = std::time::Instant::now();
-    let matcher = Matcher::new(&opts.queries, opts.is_regex, opts.and_mode)?;
+
+    // --phrase joins every query word into one exact substring.
+    let queries: Vec<String> = if opts.phrase {
+        vec![opts.queries.join(" ")]
+    } else {
+        opts.queries.clone()
+    };
+    let matcher = Matcher::new(&queries, opts.is_regex, opts.and_mode)?;
 
     // Normalize a date-only --before so it includes the whole named day
     // (lexically, "2026-07-01T10:00" > "2026-07-01" would otherwise exclude it).
@@ -389,6 +409,7 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         opts
     };
 
+    let now = std::time::SystemTime::now();
     let filtered: Vec<&SessionFile> = files
         .iter()
         .filter(|f| {
@@ -399,6 +420,19 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
             }
             if let Some(exc) = &opts.exclude_session {
                 if f.session_id.starts_with(exc.as_str()) {
+                    return false;
+                }
+            }
+            if let Some(window) = opts.exclude_live {
+                // Unknown or future mtimes count as live (conservative).
+                let live = match f.modified {
+                    Some(m) => now
+                        .duration_since(m)
+                        .map(|d| d.as_secs() < window)
+                        .unwrap_or(true),
+                    None => true,
+                };
+                if live {
                     return false;
                 }
             }
@@ -446,6 +480,16 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         SortMode::Document => {}
     }
 
+    // Dedupe AFTER sorting (keeps the best/first per sort order) and BEFORE
+    // capping, so duplicates don't eat --max slots.
+    let mut deduped = 0usize;
+    if opts.dedupe {
+        let mut seen: HashSet<String> = HashSet::new();
+        let pre = all.len();
+        all.retain(|r| seen.insert(r.text.clone()));
+        deduped = pre - all.len();
+    }
+
     let (count, intended, capped) = if let Some(mode) = opts.group_by {
         emit_groups(&all, mode, max, opts.group_samples, em)?
     } else {
@@ -465,9 +509,22 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         (count, intended, capped)
     };
 
+    // A single multi-word query is an exact-substring match — a common trap
+    // when the caller expected web-search semantics. Say so on zero hits.
+    if total_matched == 0 && !opts.is_regex && !opts.phrase && queries.len() == 1
+        && queries[0].contains(char::is_whitespace)
+    {
+        em.warn(
+            None,
+            "0 matches: a multi-word query matches as ONE exact substring. \
+             Pass words as separate arguments for OR (or ranked --sort relevance) \
+             search, or use --phrase/-F to make exact-phrase intent explicit.",
+        );
+    }
+
     let summary = SearchSummary {
         record_type: "summary",
-        query: opts.queries.join(", "),
+        query: queries.join(", "),
         // In group mode `count` is groups emitted; total_matched is always matches.
         count,
         total_matched,
@@ -476,6 +533,7 @@ pub fn run<W: Write>(opts: &SearchOpts, files: &[SessionFile], em: &mut Emitter<
         truncated: count < intended,
         // max-results hid additional matches/groups.
         capped,
+        deduped: opts.dedupe.then_some(deduped),
         elapsed_ms: start.elapsed().as_millis(),
     };
     // Always emit the summary, even when the budget is exhausted — it's the

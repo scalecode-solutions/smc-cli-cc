@@ -32,6 +32,7 @@ impl TempCorpus {
             session_id: session_id.to_string(),
             project_name: project.to_string(),
             size_bytes: content.len() as u64,
+            modified: None,
         });
     }
 }
@@ -97,6 +98,9 @@ fn opts(queries: &[&str]) -> SearchOpts {
         group_samples: 3,
         score: false,
         context: 0,
+        phrase: false,
+        dedupe: false,
+        exclude_live: None,
     }
 }
 
@@ -400,6 +404,116 @@ fn smc_output_is_excluded_unless_asked() {
     assert!(found);
 }
 
+#[test]
+fn phrases_inside_tool_inputs_match() {
+    // Regression: Write/Edit content and Bash commands (tool INPUT string
+    // values) used to be searched as escaped JSON.
+    let mut c = TempCorpus::new("toolinput");
+    c.add_session(
+        "uuu1",
+        "p",
+        &[json!({
+            "type": "assistant", "uuid": "a1", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "t1", "name": "Write",
+                "input": {"file_path": "/tmp/cfg.yaml",
+                          "content": "# ops knob, not a safety knob\nexpire_in: 86400"}
+            }]}
+        })
+        .to_string()],
+    );
+    let mut o = opts(&["knob\nexpire_in: 86400"]);
+    o.phrase = false;
+    let (found, records, _) = search(&o, &c.files, 0);
+    assert!(found, "multiline phrase inside tool input must match");
+    assert!(records[0]["text"].as_str().unwrap().contains("ops knob"));
+    // And --file still resolves paths from input string values.
+    let mut o = opts(&["knob"]);
+    o.file = Some("cfg.yaml".into());
+    let (found, _, _) = search(&o, &c.files, 0);
+    assert!(found);
+}
+
+#[test]
+fn phrase_flag_joins_words_into_one_substring() {
+    let mut c = TempCorpus::new("phrase");
+    c.add_session(
+        "vvv1",
+        "p",
+        &[
+            user("u1", None, "2026-01-01T00:00:00Z", "the flux capacitor is broken again"),
+            user("u2", None, "2026-01-01T00:00:01Z", "capacitor here, flux there"),
+        ],
+    );
+    // OR mode: both messages hit.
+    let (_, records, _) = search(&opts(&["flux", "capacitor"]), &c.files, 0);
+    assert_eq!(records.len(), 2);
+    // Phrase mode: only the exact wording.
+    let mut o = opts(&["flux", "capacitor"]);
+    o.phrase = true;
+    let (_, records, summary) = search(&o, &c.files, 0);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["line"], 1);
+    assert_eq!(summary["query"], "flux capacitor");
+}
+
+#[test]
+fn zero_match_multiword_query_gets_a_hint() {
+    let mut c = TempCorpus::new("hint");
+    c.add_session("www1", "p", &[user("u1", None, "2026-01-01T00:00:00Z", "nothing relevant")]);
+    let mut em = Emitter::capturing(0);
+    cmd::search::run(&opts(&["several words not present"]), &c.files, &mut em).unwrap();
+    let records = em.into_records();
+    let warning = records.iter().find(|r| r["type"] == "warning");
+    assert!(warning.is_some(), "0-match multi-word query must explain substring semantics");
+    assert!(warning.unwrap()["message"].as_str().unwrap().contains("--phrase"));
+    // No hint when terms are separate or the phrase is explicit.
+    let mut em = Emitter::capturing(0);
+    cmd::search::run(&opts(&["absent1", "absent2"]), &c.files, &mut em).unwrap();
+    assert!(!em.into_records().iter().any(|r| r["type"] == "warning"));
+}
+
+#[test]
+fn dedupe_collapses_identical_snippets() {
+    let mut c = TempCorpus::new("dedupe");
+    let boilerplate = "IMPORTANT: the needle instructions are repeated verbatim";
+    let mut lines: Vec<String> = (0..4)
+        .map(|i| user(&format!("u{i}"), None, "2026-01-01T00:00:00Z", boilerplate))
+        .collect();
+    lines.push(user("u9", None, "2026-01-01T00:00:01Z", "a unique needle mention"));
+    c.add_session("xxx1", "p", &lines);
+
+    let mut o = opts(&["needle"]);
+    o.dedupe = true;
+    let (_, records, summary) = search(&o, &c.files, 0);
+    assert_eq!(records.len(), 2, "4 identical snippets collapse to 1 + 1 unique");
+    assert_eq!(summary["deduped"], 3);
+    assert_eq!(summary["total_matched"], 5, "raw count stays honest");
+}
+
+#[test]
+fn exclude_live_skips_freshly_written_sessions() {
+    let mut c = TempCorpus::new("live");
+    c.add_session("yyy1", "p", &[user("u1", None, "2026-01-01T00:00:00Z", "needle live")]);
+    c.add_session("yyy2", "p", &[user("u2", None, "2026-01-01T00:00:00Z", "needle old")]);
+    // yyy1 was written "just now"; yyy2 an hour ago.
+    c.files[0].modified = Some(std::time::SystemTime::now());
+    c.files[1].modified =
+        Some(std::time::SystemTime::now() - std::time::Duration::from_secs(3600));
+
+    let mut o = opts(&["needle"]);
+    o.exclude_live = Some(120);
+    let (_, records, summary) = search(&o, &c.files, 0);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["session_id"], "yyy2");
+    assert_eq!(summary["files_scanned"], 1);
+
+    // Adversarial: unknown mtime counts as live (conservative).
+    c.files[1].modified = None;
+    let (found, _, _) = search(&o, &c.files, 0);
+    assert!(!found);
+}
+
 // ── Adversarial corpora ────────────────────────────────────────────────────
 
 #[test]
@@ -438,6 +552,7 @@ fn crlf_line_endings_parse() {
         session_id: "crlf".into(),
         project_name: "p".into(),
         size_bytes: content.len() as u64,
+        modified: None,
     });
     let (_, records, _) = search(&opts(&["needle"]), &c.files, 0);
     assert_eq!(records.len(), 2);

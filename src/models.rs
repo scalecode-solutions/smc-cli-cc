@@ -101,6 +101,33 @@ pub enum ContentView<'a> {
     None,
 }
 
+/// Collect every string leaf in a JSON value (depth-first), joined by
+/// newlines. Used to make tool-use *inputs* searchable as text: a Write call's
+/// file content or a Bash command lives inside JSON string values, and
+/// serializing the whole object (the old behavior) JSON-escaped quotes and
+/// newlines so multiline/quoted phrases could never match.
+pub fn json_string_values(v: &serde_json::Value) -> String {
+    fn walk<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.as_str()),
+            serde_json::Value::Array(items) => {
+                for it in items {
+                    walk(it, out);
+                }
+            }
+            serde_json::Value::Object(o) => {
+                for val in o.values() {
+                    walk(val, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    walk(v, &mut parts);
+    parts.join("\n")
+}
+
 /// Extract the human text from a tool_result `content` value. On disk it is
 /// either a plain string or a list of `{type, text}` blocks — serializing the
 /// whole Value (the old behavior) produced JSON-escaped text (`\"`, `\n`, block
@@ -201,14 +228,14 @@ impl MessageRecord {
         }
     }
 
-    /// Only tool input content (name + serialized input).
+    /// Only tool input content (name + the input's string values as text).
     pub fn tool_input_content(&self) -> String {
         match self.content_view() {
             ContentView::Blocks(blocks) => {
                 let mut parts = Vec::new();
                 for block in blocks {
                     if let ContentBlock::ToolUse { name, input, .. } = block {
-                        parts.push(format!("[{}] {}", name, input));
+                        parts.push(format!("[{}] {}", name, json_string_values(input)));
                     }
                 }
                 parts.join("\n")
@@ -237,7 +264,8 @@ impl MessageRecord {
         match self.content_view() {
             ContentView::Blocks(blocks) => blocks.iter().any(|block| match block {
                 ContentBlock::ToolUse { input, .. } => {
-                    input.to_string().to_lowercase().contains(&path_lower)
+                    // Paths always live inside string values.
+                    json_string_values(input).to_lowercase().contains(&path_lower)
                 }
                 ContentBlock::ToolResult { content: Some(c), .. } => {
                     tool_result_text(c).to_lowercase().contains(&path_lower)
@@ -259,7 +287,7 @@ impl MessageRecord {
                         ContentBlock::Text { text } => parts.push(text.clone()),
                         ContentBlock::Thinking { thinking } => parts.push(thinking.clone()),
                         ContentBlock::ToolUse { name, input, .. } => {
-                            parts.push(format!("[tool: {}] {}", name, input));
+                            parts.push(format!("[tool: {}] {}", name, json_string_values(input)));
                         }
                         ContentBlock::ToolResult { content: Some(c), .. } => {
                             parts.push(format!("[result] {}", tool_result_text(c)));
@@ -347,6 +375,36 @@ mod tests {
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"banana","peel":true},{"type":"text","text":"hi"}]}}"#,
         );
         assert_eq!(r.as_message().unwrap().text_content(), "hi");
+    }
+
+    #[test]
+    fn tool_input_text_is_searchable_unescaped() {
+        // Regression: Write/Edit file content and Bash commands live in tool
+        // INPUT string values; they used to be searched as escaped JSON.
+        let r = parse(
+            r##"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"/tmp/x.yaml","content":"# no app change is required.\nexpire_in: 86400\nname: \"prod\""}}]}}"##,
+        );
+        let msg = r.as_message().unwrap();
+        let full = msg.full_content();
+        assert!(full.contains("[tool: Write]"));
+        assert!(full.contains("# no app change is required.\nexpire_in: 86400"));
+        assert!(full.contains("name: \"prod\""), "quotes must not be JSON-escaped");
+        assert!(msg.tool_input_content().contains("expire_in: 86400"));
+    }
+
+    #[test]
+    fn json_string_values_walks_nested_shapes() {
+        let v = serde_json::json!({
+            "a": "top",
+            "b": {"c": ["deep", {"d": "deeper"}], "n": 42, "t": true},
+            "z": null
+        });
+        let s = json_string_values(&v);
+        for expect in ["top", "deep", "deeper"] {
+            assert!(s.contains(expect));
+        }
+        assert!(!s.contains("42"), "non-string leaves are not text");
+        assert_eq!(json_string_values(&serde_json::json!({})), "");
     }
 
     #[test]

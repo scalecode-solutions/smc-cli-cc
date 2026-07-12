@@ -73,6 +73,9 @@ smc search "migration" --group-by session          # Collapse hits per session
 smc search "labor" --group-by thread               # Collapse hits per conversation thread
 smc search "schema" --snippet-len 200              # Wider match-centered snippets
 smc search "regression" -C 2                       # Inline ±2 surrounding messages per match
+smc search -F that exact thing i remember saying   # Exact-phrase mode (no shell quoting needed)
+smc search "IMPORTANT:" --dedupe                   # Collapse identical snippets
+smc search "cargo test" --exclude-live             # Skip the conversation running smc
 ```
 
 ### Search Flags
@@ -98,6 +101,9 @@ smc search "regression" -C 2                       # Inline ±2 surrounding mess
 | `--group-by <MODE>` | | Collapse matches into groups: `session` or `thread` |
 | `--group-samples <N>` | | Sample matches to include per group (default: 3) |
 | `--context <N>` | `-C` | Inline N surrounding messages per match (default: 0) |
+| `--phrase` | `-F` | Treat all query words as ONE exact phrase (substring match) |
+| `--dedupe` | | Collapse matches with identical snippets (keeps first per sort order) |
+| `--exclude-live [SECS]` | | Skip sessions written in the last SECS seconds (default 120) |
 | `--include-smc` | `-i` | Include previous smc output (excluded by default) |
 | `--exclude-session <ID>` | | Skip a specific session |
 
@@ -108,15 +114,21 @@ smc search "regression" -C 2                       # Inline ±2 surrounding mess
 - **`--group-by`** collapses many hits about one conversation into a single `group` record (hit count, timestamp range, and a few sample snippets). `thread` resolves each match's conversation thread by walking the `parentUuid` chain to its root, separating a long session into its distinct threads.
 - **`--context N`** attaches `context_before`/`context_after` arrays to each match — up to N surrounding messages each, with `line`, `role`, `timestamp`, and a 200-char text preview. Context shows the *conversation* around a hit, so it deliberately ignores role/tool/date filters. Often replaces a follow-up `smc context` call entirely.
 - **Date filters** treat a bare `--before YYYY-MM-DD` as inclusive of that whole day, and messages without timestamps are excluded whenever a date filter is active.
+- **Query semantics**: separate words are OR'd (use `-a` for AND, `--sort relevance` for BM25 ranking); a single quoted multi-word argument — or `-F`/`--phrase` — matches as one exact substring. A zero-match multi-word query emits a `warning` record explaining the distinction.
+- **`--dedupe`** collapses matches whose snippets are byte-identical (system-reminder boilerplate echoed into many sessions), keeping the first per sort order; the summary reports how many were dropped in `deduped` while `total_matched` stays raw.
+- **Tool inputs and results are searched as text**: Write/Edit file content, Bash commands, and tool-result output are extracted from their JSON containers, so multiline and quoted phrases match naturally.
 
 ### AI-Friendly Features
 
 smc is designed to work well when used by AI assistants inside Claude Code sessions:
 
 ```bash
-smc search "bug" --exclude-session 394af           # Skip the current session
+smc search "bug" --exclude-session 394af           # Skip a session by ID
+smc search "bug" --exclude-live                    # Skip live sessions (the one running smc)
 smc search "bug" -i                                # Include previous smc output
 ```
+
+`--exclude-live` solves self-matching: the conversation invoking smc logs its own commands, so a search for `"cargo publish"` finds the very command that ran it. Excluding sessions written in the last ~2 minutes (transcript writes are debounced) keeps results historical.
 
 Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag (and the tool version) into its output. By default, search **excludes** any conversation record containing that tag — so an AI searching for "X" never matches its own previous search output for "X". The header is emitted before any token-budget truncation, so the guard holds even on cut-short output. Use `-i`/`--include-smc` to opt back in.
 
@@ -127,7 +139,7 @@ Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag
 All output is JSON Lines — one record per line, zero ANSI, zero pagination. Every stream opens with a `meta` record and search closes with a `summary`:
 
 ```jsonl
-{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.9.0"}
+{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.9.1"}
 {"type":"match","project":"myapp","session_id":"394afc...","line":42,"uuid":"a1b2...","role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","score":3.41,"text":"…centered on the match…","match_offset":1014,"msg_chars":1293}
 {"type":"summary","query":"deploy","count":2,"total_matched":2,"files_scanned":293,"truncated":false,"capped":false,"elapsed_ms":3}
 ```

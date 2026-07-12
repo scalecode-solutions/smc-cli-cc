@@ -11,6 +11,9 @@ pub struct SessionFile {
     pub session_id: String,
     pub project_name: String,
     pub size_bytes: u64,
+    /// Filesystem mtime — used by `--exclude-live` to skip sessions that are
+    /// being written right now (e.g. the conversation invoking smc).
+    pub modified: Option<std::time::SystemTime>,
 }
 
 impl SessionFile {
@@ -61,13 +64,13 @@ pub fn discover_jsonl_files(base: &Path) -> Result<Vec<SessionFile>> {
         }
 
         let Ok(dir_entries) = std::fs::read_dir(&project_dir) else { continue };
-        let mut jsonl: Vec<(PathBuf, u64)> = Vec::new();
+        let mut jsonl: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
         for file_entry in dir_entries {
             let Ok(file_entry) = file_entry else { continue };
             let path = file_entry.path();
             if path.extension().is_some_and(|e| e == "jsonl") && path.is_file() {
                 let Ok(metadata) = std::fs::metadata(&path) else { continue };
-                jsonl.push((path, metadata.len()));
+                jsonl.push((path, metadata.len(), metadata.modified().ok()));
             }
         }
         if jsonl.is_empty() {
@@ -81,7 +84,7 @@ pub fn discover_jsonl_files(base: &Path) -> Result<Vec<SessionFile>> {
         let project_name = project_name_from_cwd(&jsonl)
             .unwrap_or_else(|| extract_project_name(dir_name.to_str().unwrap_or("")));
 
-        for (path, size_bytes) in jsonl {
+        for (path, size_bytes, modified) in jsonl {
             let session_id = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -93,6 +96,7 @@ pub fn discover_jsonl_files(base: &Path) -> Result<Vec<SessionFile>> {
                 session_id,
                 project_name: project_name.clone(),
                 size_bytes,
+                modified,
             });
         }
     }
@@ -103,9 +107,9 @@ pub fn discover_jsonl_files(base: &Path) -> Result<Vec<SessionFile>> {
 
 /// Read the exact project name from the `cwd` field of the first few records
 /// of up to three session files in the project directory.
-fn project_name_from_cwd(jsonl: &[(PathBuf, u64)]) -> Option<String> {
+fn project_name_from_cwd(jsonl: &[(PathBuf, u64, Option<std::time::SystemTime>)]) -> Option<String> {
     use std::io::BufRead;
-    for (path, _) in jsonl.iter().take(3) {
+    for (path, ..) in jsonl.iter().take(3) {
         let Ok(f) = std::fs::File::open(path) else { continue };
         let reader = std::io::BufReader::new(f);
         for line in reader.lines().take(20) {
