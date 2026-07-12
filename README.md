@@ -123,7 +123,7 @@ Every smc invocation begins with a `meta` record stamping the `<smc-cc-cli>` tag
 All output is JSON Lines — one record per line, zero ANSI, zero pagination. Every stream opens with a `meta` record and search closes with a `summary`:
 
 ```jsonl
-{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.8.7"}
+{"type":"meta","tool":"smc","tag":"<smc-cc-cli>","version":"0.8.9"}
 {"type":"match","project":"myapp","session_id":"394afc...","line":42,"uuid":"a1b2...","role":"user","timestamp":"2026-02-10T15:30:00Z","matched_query":"deploy","score":3.41,"text":"…centered on the match…","match_offset":1014,"msg_chars":1293}
 {"type":"summary","query":"deploy","count":2,"total_matched":2,"files_scanned":293,"truncated":false,"capped":false,"elapsed_ms":3}
 ```
