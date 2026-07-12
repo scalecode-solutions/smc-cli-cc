@@ -4,7 +4,7 @@ use std::io::Write;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::models::{ContentBlock, MessageContent, Record};
+use crate::models::{ContentBlock, ContentView, Record};
 use crate::output::Emitter;
 use crate::util::discover::SessionFile;
 
@@ -92,9 +92,9 @@ fn build_message_out(
     let mut tool_calls = Vec::new();
     let mut thinking_text = None;
 
-    match &msg.message.content {
-        MessageContent::Text(s) => text_parts.push(s.clone()),
-        MessageContent::Blocks(blocks) => {
+    match msg.content_view() {
+        ContentView::Text(s) => text_parts.push(s.to_string()),
+        ContentView::Blocks(blocks) => {
             for block in blocks {
                 match block {
                     ContentBlock::Text { text } => text_parts.push(text.clone()),
@@ -114,6 +114,7 @@ fn build_message_out(
                 }
             }
         }
+        ContentView::None => {}
     }
 
     MessageOut {

@@ -4,7 +4,7 @@ use std::io::Write;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::models::{ContentBlock, MessageContent};
+use crate::models::{tool_result_text, ContentBlock, ContentView};
 use crate::output::Emitter;
 use crate::util::discover::SessionFile;
 
@@ -54,12 +54,12 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
 
         md.push_str(&format!("## {} ({})\n\n", role.to_uppercase(), ts_short));
 
-        match &msg.message.content {
-            MessageContent::Text(s) => {
+        match msg.content_view() {
+            ContentView::Text(s) => {
                 md.push_str(s);
                 md.push_str("\n\n");
             }
-            MessageContent::Blocks(blocks) => {
+            ContentView::Blocks(blocks) => {
                 for block in blocks {
                     match block {
                         ContentBlock::Text { text } => {
@@ -78,7 +78,7 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
                             md.push_str(&format!("**Tool: {}**\n```json\n{}\n```\n\n", name, pretty));
                         }
                         ContentBlock::ToolResult { content: Some(c), .. } => {
-                            let s = c.to_string();
+                            let s = tool_result_text(c);
                             let preview: String = s.chars().take(2000).collect();
                             md.push_str(&format!("**Result:**\n```\n{}\n```\n\n", preview));
                         }
@@ -86,6 +86,7 @@ pub fn run<W: Write>(opts: &ExportOpts, file: &SessionFile, em: &mut Emitter<W>)
                     }
                 }
             }
+            ContentView::None => {}
         }
 
         md.push_str("---\n\n");

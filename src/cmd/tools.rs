@@ -42,7 +42,7 @@ pub fn run<W: Write>(_opts: &ToolsOpts, file: &SessionFile, em: &mut Emitter<W>)
             continue;
         }
 
-        if let crate::models::MessageContent::Blocks(blocks) = &msg.message.content {
+        if let crate::models::ContentView::Blocks(blocks) = msg.content_view() {
             for block in blocks {
                 if let crate::models::ContentBlock::ToolUse { name, input, .. } = block {
                     let preview: String = input.to_string().chars().take(200).collect();
