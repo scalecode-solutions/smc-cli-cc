@@ -451,5 +451,9 @@ fn run(cli: Cli, max_tokens: usize) -> anyhow::Result<bool> {
         }
     };
 
+    // Trailing tag record: the anti-recursion tag must survive `| tail`
+    // (which strips the leading meta) — belt at both ends of every stream.
+    em.finish()?;
+
     Ok(found)
 }

@@ -29,6 +29,30 @@ impl MetaRecord {
     }
 }
 
+// ── End (output trailer) ─────────────────────────────────────────────────────
+
+/// Last record of every output stream: the anti-recursion tag again.
+///
+/// The tag must survive output slicing — `smc ... | tail -1` strips the
+/// leading meta record, and the captured output then lands in a transcript
+/// with no tag for downstream recursion guards (smc's own `--include-smc`
+/// default, Heliopolis's include_meta exclusion) to recognize. Belt at both
+/// ends: `head` keeps the meta, `tail` keeps the end. (Found in the wild by
+/// the first external Heliopolis test: piped smc output polluted archive
+/// search results.)
+#[derive(Serialize, Debug)]
+pub struct EndRecord {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub tag: &'static str,
+}
+
+impl EndRecord {
+    pub fn current() -> Self {
+        Self { record_type: "end", tag: SMC_TAG }
+    }
+}
+
 // ── Error / Warning ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Debug)]

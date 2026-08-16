@@ -25,11 +25,14 @@ pub struct Emitter<W: Write> {
     pub truncated: bool,
     /// Whether the leading provenance/anti-recursion header has been written.
     header_written: bool,
+    /// Whether this stream's header took the markdown-comment form
+    /// (set by the first write; decides the trailer's form too).
+    markdown_stream: bool,
 }
 
 impl<W: Write> Emitter<W> {
     pub fn new(writer: W, budget: usize) -> Self {
-        Self { out: BufWriter::new(writer), budget, used: 0, truncated: false, header_written: false }
+        Self { out: BufWriter::new(writer), budget, used: 0, truncated: false, header_written: false, markdown_stream: false }
     }
 
     /// Write the one-time leading header that stamps the anti-recursion tag into
@@ -42,6 +45,7 @@ impl<W: Write> Emitter<W> {
             return Ok(());
         }
         self.header_written = true;
+        self.markdown_stream = markdown;
         let line = if markdown {
             format!("<!-- smc {} v{} -->", SMC_TAG, env!("CARGO_PKG_VERSION"))
         } else {
@@ -88,6 +92,24 @@ impl<W: Write> Emitter<W> {
     pub fn warn(&mut self, file: Option<&str>, msg: &str) {
         let rec = ErrorRecord::warn(file, msg);
         let _ = self.emit(&rec);
+    }
+
+    /// Write the one-time trailing tag record and flush. Unconditional (never
+    /// budget-blocked), like the header: the tag must reach BOTH ends of the
+    /// stream so output slicing (`| head` keeps the meta, `| tail` keeps the
+    /// end) can't strip every copy — a sliced capture with no tag defeats
+    /// downstream recursion guards. Call once, at process exit.
+    pub fn finish(&mut self) -> Result<()> {
+        self.ensure_header(false)?;
+        let line = if self.markdown_stream {
+            format!("<!-- smc end {} -->", SMC_TAG)
+        } else {
+            serde_json::to_string(&super::records::EndRecord::current())?
+        };
+        self.used += tokens::approx_line(line.len());
+        self.out.write_all(line.as_bytes())?;
+        self.out.write_all(b"\n")?;
+        self.flush()
     }
 
     /// Flush the underlying writer.
@@ -200,6 +222,42 @@ mod tests {
             assert!(em.emit(&json!({"n": i})).unwrap());
         }
         assert!(!em.truncated);
+    }
+
+    #[test]
+    fn finish_appends_tagged_end_record() {
+        // Regression: `smc ... | tail -1` stripped the only tagged line (the
+        // leading meta), so captured output defeated recursion guards.
+        let mut em = Emitter::capturing(0);
+        em.emit(&json!({"type": "match"})).unwrap();
+        em.finish().unwrap();
+        let records = em.into_records();
+        let last = records.last().unwrap();
+        assert_eq!(last["type"], "end");
+        assert_eq!(last["tag"], super::SMC_TAG);
+    }
+
+    #[test]
+    fn finish_on_markdown_stream_uses_comment_form() {
+        let mut em = Emitter::capturing(0);
+        em.raw("# heading").unwrap();
+        em.finish().unwrap();
+        let text = String::from_utf8(em.into_bytes()).unwrap();
+        let last = text.lines().last().unwrap();
+        assert!(last.starts_with("<!-- smc end"), "got {last:?}");
+        assert!(last.contains(super::SMC_TAG));
+    }
+
+    #[test]
+    fn finish_survives_exhausted_budget() {
+        // The end record, like the header and summary, must reach the stream
+        // even when the budget already cut emission short.
+        let mut em = Emitter::capturing(1);
+        let _ = em.emit(&json!({"data": "aaaa bbbb cccc dddd eeee"}));
+        assert!(em.truncated);
+        em.finish().unwrap();
+        let records = em.into_records();
+        assert_eq!(records.last().unwrap()["type"], "end");
     }
 
     #[test]
